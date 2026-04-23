@@ -1,0 +1,16 @@
+node_modules
+.pnpm-store
+apps/*/node_modules
+packages/*/node_modules
+apps/*/dist
+packages/*/dist
+.git
+.gitignore
+.env
+.env.local
+.env.*
+!.env.example
+.codex-smoke-logs
+coverage
+tmp
+storage

@@ -1,0 +1,183 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum ConversationStatus {
+  active
+  archived
+  deleted
+}
+
+enum MessageRole {
+  system
+  user
+  assistant
+  tool
+}
+
+enum AssetStatus {
+  pending
+  ready
+  failed
+  deleted
+}
+
+enum TaskStatus {
+  queued
+  submitted
+  running
+  succeeded
+  failed
+  cancelled
+  expired
+  action_required
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String?        @unique
+  displayName   String?        @map("display_name")
+  avatarUrl     String?        @map("avatar_url")
+  metadata      Json?
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  conversations Conversation[]
+  messages      Message[]
+  assets        Asset[]
+  tasks         Task[]
+
+  @@map("users")
+}
+
+model Conversation {
+  id        String             @id @default(cuid())
+  userId    String             @map("user_id")
+  title     String?
+  status    ConversationStatus @default(active)
+  metadata  Json?
+  createdAt DateTime           @default(now()) @map("created_at")
+  updatedAt DateTime           @updatedAt @map("updated_at")
+  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+  tasks     Task[]
+
+  @@index([userId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String       @map("conversation_id")
+  userId         String?      @map("user_id")
+  role           MessageRole
+  content        String
+  metadata       Json?
+  createdAt      DateTime     @default(now()) @map("created_at")
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User?        @relation(fields: [userId], references: [id], onDelete: SetNull)
+  assets         Asset[]
+
+  @@index([conversationId])
+  @@index([userId])
+  @@map("messages")
+}
+
+model Asset {
+  id        String      @id @default(cuid())
+  userId    String?     @map("user_id")
+  messageId String?     @map("message_id")
+  taskId    String?     @map("task_id")
+  type      String
+  mimeType  String?     @map("mime_type")
+  url       String?
+  storageKey String?    @map("storage_key")
+  status    AssetStatus @default(pending)
+  metadata  Json?
+  createdAt DateTime    @default(now()) @map("created_at")
+  updatedAt DateTime    @updatedAt @map("updated_at")
+  user      User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+  message   Message?    @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  task      Task?       @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([messageId])
+  @@index([taskId])
+  @@map("assets")
+}
+
+model Task {
+  id             String        @id @default(cuid())
+  userId         String?       @map("user_id")
+  conversationId String?       @map("conversation_id")
+  type           String
+  status         TaskStatus    @default(queued)
+  progress       Int           @default(0)
+  input          Json?
+  output         Json?
+  errorMessage   String?       @map("error_message")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  updatedAt      DateTime      @updatedAt @map("updated_at")
+  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  assets         Asset[]
+  events         TaskEvent[]
+
+  @@index([userId])
+  @@index([conversationId])
+  @@index([status])
+  @@map("tasks")
+}
+
+model TaskEvent {
+  id        String      @id @default(cuid())
+  taskId    String      @map("task_id")
+  eventType String      @map("event_type")
+  status    TaskStatus?
+  summary   String
+  details   Json?
+  createdAt DateTime    @default(now()) @map("created_at")
+  task      Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@index([createdAt])
+  @@map("task_events")
+}
+
+model ModelCapability {
+  id          String   @id @default(cuid())
+  provider    String
+  model       String
+  modality    String
+  capabilities Json
+  enabled     Boolean  @default(true)
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([provider, model, modality])
+  @@map("model_capabilities")
+}
+
+model ProviderOperationalState {
+  id                   String      @id
+  lastCheckStatus      String?     @map("last_check_status")
+  lastCheckAt          DateTime?   @map("last_check_at")
+  lastCheckLatencyMs   Int?        @map("last_check_latency_ms")
+  lastCheckError       Json?       @map("last_check_error")
+  modelsSource         String?     @map("models_source")
+  remoteModelsSnapshot Json?       @map("remote_models_snapshot")
+  lastTestTaskId       String?     @map("last_test_task_id")
+  lastTestStatus       TaskStatus? @map("last_test_status")
+  lastTestAt           DateTime?   @map("last_test_at")
+  lastTestError        String?     @map("last_test_error")
+  activeAlerts         Json?       @map("active_alerts")
+  lastAcknowledgedAt   DateTime?   @map("last_acknowledged_at")
+  updatedAt            DateTime    @updatedAt @map("updated_at")
+
+  @@map("provider_operational_state")
+}

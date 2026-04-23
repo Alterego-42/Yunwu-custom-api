@@ -1,0 +1,25 @@
+{
+  "name": "yunwu-custom-api",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@10.17.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "lint": "pnpm -r lint",
+    "format": "pnpm -r format",
+    "docker:infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d",
+    "docker:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
+    "docker:up": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build",
+    "docker:down": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml down",
+    "docker:config": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml config",
+    "docker:ps": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml ps",
+    "docker:logs": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml logs --tail=200",
+    "docker:migrate": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml run --rm api ./apps/api/node_modules/.bin/prisma migrate deploy --schema apps/api/prisma/schema.prisma"
+  },
+  "pnpm": {
+    "overrides": {
+      "typescript": "5.7.3"
+    }
+  }
+}
