@@ -1,32 +1,46 @@
+import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 
 import { ChatPanel } from "@/components/chat/chat-panel";
 import { DetailPanel } from "@/components/chat/detail-panel";
 import { SessionList } from "@/components/chat/session-list";
+import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api-client";
-import { formatRelativeTime } from "@/lib/api-mappers";
+import {
+  getTaskComposerAssets,
+  getTaskIntentMode,
+  isTaskActive,
+  summarizeParams,
+  toConversationSummary,
+  toUiTask,
+} from "@/lib/api-mappers";
 import type {
   AssetRecord,
   CapabilityType,
   ConversationDetail,
   ConversationSummary,
   ModelRecord,
-  TaskEventRecord,
   TaskRecord,
   UiTask,
-  UiTaskAsset,
 } from "@/lib/api-types";
 
 type ConnectionMode = "sse" | "polling" | "connecting" | "idle";
 
+type ComposerContext = {
+  prompt?: string;
+  model?: string;
+  capability?: CapabilityType;
+  params?: Record<string, unknown>;
+  sourceTaskId?: string;
+  sourceAction?: "edit" | "variant" | "fork";
+  fork?: boolean;
+  hint?: string;
+  submitLabel?: string;
+};
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "请求失败，请稍后重试。";
-}
-
-const ACTIVE_TASK_STATUSES = new Set(["queued", "submitted", "running"]);
-
-function isTaskActive(task: TaskRecord) {
-  return ACTIVE_TASK_STATUSES.has(task.status);
 }
 
 function getPollingDelay(tasks: TaskRecord[]) {
@@ -41,148 +55,47 @@ function getPollingDelay(tasks: TaskRecord[]) {
   return 2500;
 }
 
-function getTaskProgress(task: TaskRecord) {
-  const apiProgress = (task as TaskRecord & { progress?: number }).progress;
-  if (typeof apiProgress === "number") {
-    return Math.min(100, Math.max(0, Math.round(apiProgress)));
-  }
-
-  switch (task.status) {
-    case "queued":
-      return 8;
-    case "submitted":
-      return 20;
-    case "running":
-      return 72;
-    case "action_required":
-      return 92;
-    case "succeeded":
-    case "failed":
-    case "cancelled":
-    case "expired":
-      return 100;
-    default:
-      return 0;
-  }
-}
-
-function toUiTaskAsset(asset: AssetRecord): UiTaskAsset {
-  const size = asset.width && asset.height ? `${asset.width} × ${asset.height}` : undefined;
-
-  return {
-    id: asset.id,
-    type: asset.type,
-    url: asset.url,
-    mimeType: asset.mimeType,
-    width: asset.width,
-    height: asset.height,
-    createdAt: asset.createdAt,
-    label: size ?? asset.mimeType ?? asset.id,
-  };
-}
-
-function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
-  const inputAssets = assets
-    .filter((asset) => asset.type === "upload" && (task.assetIds?.includes(asset.id) || asset.taskId === task.id))
-    .map(toUiTaskAsset);
-  const resultAssets = assets
-    .filter((asset) => asset.type === "generated" && asset.taskId === task.id)
-    .map(toUiTaskAsset);
-  const latestMessage = task.messages?.at(-1)?.content?.trim();
-  const isTerminal =
-    task.status === "succeeded" ||
-    task.status === "failed" ||
-    task.status === "cancelled" ||
-    task.status === "expired";
-
-  return {
-    id: task.id,
-    title: task.prompt || task.capability,
-    prompt: task.prompt,
-    progress: getTaskProgress(task),
-    status: task.status,
-    eta: isTerminal ? `更新于 ${formatRelativeTime(task.updatedAt)}` : `最近更新 ${formatRelativeTime(task.updatedAt)}`,
-    tags: [task.capability, task.modelId].filter(Boolean),
-    capability: task.capability,
-    model: task.modelId,
-    createdAt: task.createdAt,
-    updatedAt: task.updatedAt,
-    errorMessage: task.errorMessage,
-    summary: latestMessage && latestMessage !== task.errorMessage ? latestMessage : undefined,
-    inputAssets,
-    resultAssets,
-  };
-}
-
-function mergeConversationTask(conversation: ConversationDetail, task: TaskRecord) {
-  const existingIndex = conversation.tasks.findIndex((item) => item.id === task.id);
-
-  if (existingIndex >= 0) {
-    const tasks = [...conversation.tasks];
-    tasks[existingIndex] = {
-      ...tasks[existingIndex],
-      ...task,
-    };
-
-    return {
-      ...conversation,
-      tasks,
-    };
-  }
-
-  return {
-    ...conversation,
-    tasks: [task, ...conversation.tasks],
-  };
-}
-
-function toConversationSummary(conversation: ConversationDetail): ConversationSummary {
-  return {
-    id: conversation.id,
-    title: conversation.title,
-    summary: conversation.messages.at(-1)?.content,
-    status: conversation.tasks.some(isTaskActive)
-      ? "running"
-      : conversation.tasks.length > 0
-        ? "done"
-        : "idle",
-    model: conversation.tasks[0]?.modelId,
-    createdAt: conversation.createdAt,
-    updatedAt: conversation.updatedAt,
-  };
-}
-
 export function WorkspacePage() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const params = useParams();
+  const routeConversationId =
+    typeof params.conversationId === "string" ? params.conversationId : undefined;
+  const isRouteDriven = Boolean(routeConversationId);
+
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
-  const [activeId, setActiveId] = useState<string>();
+  const [fallbackActiveId, setFallbackActiveId] = useState<string>();
   const [activeSession, setActiveSession] = useState<ConversationDetail>();
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadedAssets, setUploadedAssets] = useState<AssetRecord[]>([]);
-  const [taskEvents, setTaskEvents] = useState<TaskEventRecord[]>([]);
+  const [selectedAssets, setSelectedAssets] = useState<AssetRecord[]>([]);
   const [listError, setListError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
-  const [taskEventError, setTaskEventError] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("idle");
+  const [composerContext, setComposerContext] = useState<ComposerContext | null>(null);
   const activeSessionRef = useRef<ConversationDetail | undefined>(undefined);
   const refreshPromiseRef = useRef<{
     conversationId: string;
     promise: Promise<ConversationDetail>;
   } | null>(null);
 
+  const activeId = routeConversationId ?? fallbackActiveId;
+
   useEffect(() => {
     activeSessionRef.current = activeSession;
   }, [activeSession]);
 
-  const applyConversation = useCallback((conversation: ConversationDetail, events?: TaskEventRecord[]) => {
+  useEffect(() => {
+    setSelectedAssets([]);
+    setComposerContext(null);
+    setUploadError(null);
+  }, [activeId]);
+
+  const applyConversation = useCallback((conversation: ConversationDetail) => {
     setActiveSession(conversation);
-    setUploadedAssets(conversation.assets.filter((asset) => asset.type === "upload"));
-    if (events) {
-      setTaskEvents(events);
-    }
     setSessions((current) => {
       const summary = toConversationSummary(conversation);
       const exists = current.some((item) => item.id === conversation.id);
@@ -209,21 +122,8 @@ export function WorkspacePage() {
         setDetailError(null);
 
         try {
-          const [conversation, eventResult] = await Promise.all([
-            apiClient.getConversation(conversationId),
-            apiClient
-              .listConversationTaskEvents(conversationId)
-              .then((events) => ({ events }))
-              .catch((error: unknown) => ({ error })),
-          ]);
-
-          if ("error" in eventResult) {
-            setTaskEventError(`任务历史事件暂不可用：${getErrorMessage(eventResult.error)}`);
-            applyConversation(conversation);
-          } else {
-            setTaskEventError(null);
-            applyConversation(conversation, eventResult.events);
-          }
+          const conversation = await apiClient.getConversation(conversationId);
+          applyConversation(conversation);
           return conversation;
         } catch (error) {
           setDetailError(getErrorMessage(error));
@@ -248,7 +148,7 @@ export function WorkspacePage() {
     [applyConversation],
   );
 
-  async function loadInitialData() {
+  const loadInitialData = useCallback(async () => {
     setListLoading(true);
     setListError(null);
 
@@ -260,7 +160,7 @@ export function WorkspacePage() {
 
       setSessions(conversationList);
       setModels(modelList);
-      setActiveId((current) => current ?? conversationList[0]?.id);
+      setFallbackActiveId((current) => current ?? (!routeConversationId ? conversationList[0]?.id : current));
     } catch (error) {
       setListError(`${getErrorMessage(error)}（API: ${apiClient.getBaseUrl()}）`);
       setSessions([]);
@@ -268,29 +168,23 @@ export function WorkspacePage() {
     } finally {
       setListLoading(false);
     }
-  }
+  }, [routeConversationId]);
 
   useEffect(() => {
     void loadInitialData();
-  }, []);
+  }, [loadInitialData]);
 
   useEffect(() => {
     if (!activeId) {
       setActiveSession(undefined);
-      setUploadedAssets([]);
-      setTaskEvents([]);
-      setTaskEventError(null);
       return;
     }
 
     let ignore = false;
-    setTaskEvents([]);
-    setTaskEventError(null);
 
     refreshConversation(activeId).catch(() => {
       if (!ignore) {
         setActiveSession(undefined);
-        setTaskEvents([]);
       }
     });
 
@@ -301,8 +195,8 @@ export function WorkspacePage() {
 
   const activePollingKey = useMemo(
     () =>
-      activeSession?.id === activeId
-        ? activeSession?.tasks
+      activeSession && activeSession.id === activeId
+        ? activeSession.tasks
             .filter(isTaskActive)
             .map((task) => `${task.id}:${task.status}:${task.updatedAt}`)
             .join("|")
@@ -347,11 +241,7 @@ export function WorkspacePage() {
   }, [activeId, refreshConversation]);
 
   useEffect(() => {
-    if (!activeId || !activePollingKey) {
-      return;
-    }
-
-    if (connectionMode === "sse") {
+    if (!activeId || !activePollingKey || connectionMode === "sse") {
       return;
     }
 
@@ -375,7 +265,7 @@ export function WorkspacePage() {
       try {
         await refreshConversation(activeId, { silent: true });
       } catch {
-        // Keep current UI data and retry on the next scheduled tick.
+        // Keep current UI state and retry on next tick.
       }
 
       if (!cancelled) {
@@ -394,121 +284,258 @@ export function WorkspacePage() {
     };
   }, [activeId, activePollingKey, connectionMode, refreshConversation]);
 
-  async function handleCreateSession() {
-    setListError(null);
-
-    try {
-      const conversation = await apiClient.createConversation({
-        title: `新会话 ${new Date().toLocaleTimeString()}`,
-      });
-
-      applyConversation(conversation, []);
-      setActiveId(conversation.id);
-    } catch (error) {
-      setListError(getErrorMessage(error));
-    }
-  }
-
-  async function handleUploadAsset(file: File) {
-    if (!activeId) {
-      throw new Error("请先选择或创建会话。");
-    }
-
-    setUploadError(null);
-    setIsUploading(true);
-
-    try {
-      const response = await apiClient.uploadAsset(file, { conversationId: activeId });
-      setUploadedAssets((current) => {
-        if (current.some((asset) => asset.id === response.asset.id)) {
-          return current;
-        }
-
-        return [...current, response.asset];
-      });
-      setActiveSession((current) =>
-        current
-          ? {
-              ...current,
-              assets: current.assets.some((asset) => asset.id === response.asset.id)
-                ? current.assets
-                : [...current.assets, response.asset],
-            }
-          : current,
-      );
-    } catch (error) {
-      const message = getErrorMessage(error);
-      setUploadError(message);
-      throw error;
-    } finally {
-      setIsUploading(false);
-    }
-  }
-
-  function handleRemoveUpload(assetId: string) {
-    setUploadedAssets((current) => current.filter((asset) => asset.id !== assetId));
-    setUploadError(null);
-  }
-
-  async function handleSubmitTask(input: {
-    prompt: string;
-    model: string;
-    capability: CapabilityType;
-    assetIds?: string[];
-  }) {
-    if (!activeId) {
-      throw new Error("请先选择或创建会话。");
-    }
-
-    setDetailError(null);
-
-    const response = await apiClient.createTask({
-      conversationId: activeId,
-      capability: input.capability,
-      model: input.model,
-      prompt: input.prompt,
-      assetIds: input.assetIds,
-    });
-
-    applyConversation(mergeConversationTask(response.conversation, response.task));
-    void refreshConversation(activeId, { silent: true });
-  }
+  const taskRecordById = useMemo(
+    () => new Map((activeSession?.tasks ?? []).map((task) => [task.id, task])),
+    [activeSession],
+  );
 
   const uiTasks = useMemo(
     () => activeSession?.tasks.map((task) => toUiTask(task, activeSession.assets)) ?? [],
     [activeSession],
   );
+
   const queueLength = uiTasks.filter((task) =>
     ["queued", "submitted", "running"].includes(task.status),
   ).length;
 
+  const primeComposerFromTask = useCallback(
+    (task: TaskRecord, mode: "edit" | "variant", fork = false) => {
+      const relatedAssets = getTaskComposerAssets(task, activeSession?.assets ?? []);
+
+      setSelectedAssets(relatedAssets);
+      setComposerContext({
+        prompt: task.prompt,
+        model: task.modelId,
+        capability:
+          mode === "edit" || relatedAssets.length > 0
+            ? "image.edit"
+            : task.capability,
+        params: task.params,
+        sourceTaskId: task.id,
+        sourceAction: fork ? "fork" : mode,
+        fork,
+        submitLabel: fork ? "Fork 并提交" : mode === "variant" ? "生成变体" : "继续创作",
+        hint: `${fork ? "将从来源任务 Fork 新会话" : "已按来源任务预填"} · ${summarizeParams(task.params)}`,
+      });
+    },
+    [activeSession],
+  );
+
+  const handleCreateSession = useCallback(async () => {
+    if (isRouteDriven) {
+      navigate("/create");
+      return;
+    }
+
+    setListError(null);
+    try {
+      const conversation = await apiClient.createConversation({
+        title: `新会话 ${new Date().toLocaleTimeString()}`,
+      });
+      applyConversation(conversation);
+      setFallbackActiveId(conversation.id);
+    } catch (error) {
+      setListError(getErrorMessage(error));
+    }
+  }, [applyConversation, isRouteDriven, navigate]);
+
+  const handleSelectSession = useCallback(
+    (conversationId: string) => {
+      if (isRouteDriven) {
+        navigate(`/workspace/${conversationId}`);
+        return;
+      }
+
+      setFallbackActiveId(conversationId);
+    },
+    [isRouteDriven, navigate],
+  );
+
+  const handleUploadAsset = useCallback(
+    async (file: File) => {
+      setUploadError(null);
+      setIsUploading(true);
+
+      try {
+        const response = await apiClient.uploadAsset(file, activeId ? { conversationId: activeId } : {});
+        setSelectedAssets((current) =>
+          current.some((asset) => asset.id === response.asset.id)
+            ? current
+            : [...current, response.asset],
+        );
+        setActiveSession((current) =>
+          current
+            ? {
+                ...current,
+                assets: current.assets.some((asset) => asset.id === response.asset.id)
+                  ? current.assets
+                  : [...current.assets, response.asset],
+              }
+            : current,
+        );
+      } catch (error) {
+        const message = getErrorMessage(error);
+        setUploadError(message);
+        throw error;
+      } finally {
+        setIsUploading(false);
+      }
+    },
+    [activeId],
+  );
+
+  const handleRemoveUpload = useCallback((assetId: string) => {
+    setSelectedAssets((current) => current.filter((asset) => asset.id !== assetId));
+    setUploadError(null);
+  }, []);
+
+  const resetComposer = useCallback(() => {
+    setSelectedAssets([]);
+    setComposerContext(null);
+  }, []);
+
+  const handleSubmitTask = useCallback(
+    async (input: {
+      prompt: string;
+      model: string;
+      capability: CapabilityType;
+      assetIds?: string[];
+      params?: Record<string, unknown>;
+    }) => {
+      if (!activeId && !composerContext?.fork) {
+        throw new Error("请先选择会话。");
+      }
+
+      setDetailError(null);
+      const response = await apiClient.createTask({
+        conversationId: activeId,
+        capability: input.capability,
+        model: input.model,
+        prompt: input.prompt,
+        assetIds: input.assetIds,
+        params: input.params,
+        sourceTaskId: composerContext?.sourceTaskId,
+        sourceAction: composerContext?.sourceAction,
+        fork: composerContext?.fork,
+      });
+
+      applyConversation(response.conversation);
+      setSessions((current) => {
+        const next = toConversationSummary(response.conversation);
+        const withoutExisting = current.filter((item) => item.id !== next.id);
+        return [next, ...withoutExisting];
+      });
+
+      if (response.conversation.id !== activeId) {
+        if (location.pathname.startsWith("/workspace/")) {
+          navigate(`/workspace/${response.conversation.id}`);
+        } else {
+          setFallbackActiveId(response.conversation.id);
+        }
+      } else {
+        void refreshConversation(response.conversation.id, { silent: true });
+      }
+
+      resetComposer();
+    },
+    [activeId, applyConversation, composerContext, location.pathname, navigate, refreshConversation, resetComposer],
+  );
+
+  const handleRetryTask = useCallback(
+    async (task: TaskRecord) => {
+      await apiClient.retryTask(task.id);
+      if (task.conversationId) {
+        await refreshConversation(task.conversationId, { silent: true });
+      }
+    },
+    [refreshConversation],
+  );
+
+  const renderTaskActions = useCallback(
+    (uiTask: UiTask) => {
+      const task = taskRecordById.get(uiTask.id);
+      if (!task) {
+        return null;
+      }
+
+      const actions: ReactNode[] = [];
+
+      if (task.status === "succeeded") {
+        actions.push(
+          <Button key={`${task.id}-edit`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "edit")}>
+            再编辑
+          </Button>,
+        );
+        actions.push(
+          <Button key={`${task.id}-variant`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "variant")}>
+            生成变体
+          </Button>,
+        );
+        actions.push(
+          <Button key={`${task.id}-fork`} size="sm" onClick={() => primeComposerFromTask(task, "variant", true)}>
+            Fork 新会话
+          </Button>,
+        );
+      }
+
+      if (task.status === "failed" && task.canRetry) {
+        actions.push(
+          <Button key={`${task.id}-retry`} size="sm" onClick={() => void handleRetryTask(task)}>
+            一键重试
+          </Button>,
+        );
+      }
+
+      if (task.status === "failed" && task.failure?.category === "invalid_request") {
+        actions.push(
+          <Button
+            key={`${task.id}-recover`}
+            size="sm"
+            variant="outline"
+            onClick={() => primeComposerFromTask(task, getTaskIntentMode(task))}
+          >
+            调整后继续
+          </Button>,
+        );
+      }
+
+      return actions.length > 0 ? actions : null;
+    },
+    [handleRetryTask, primeComposerFromTask, taskRecordById],
+  );
+
   return (
-    <div className="grid h-[calc(100vh-136px)] min-h-[720px] gap-4 xl:grid-cols-[320px_minmax(0,1fr)_360px]">
-      <SessionList
-        sessions={sessions}
-        activeId={activeId}
-        isLoading={listLoading}
-        error={listError}
-        onCreate={handleCreateSession}
-        onSelect={setActiveId}
-      />
-      <ChatPanel
-        session={activeSession}
-        models={models}
-        isLoading={detailLoading}
-        error={detailError}
-        uploadError={uploadError}
-        taskEventError={taskEventError}
-        uploads={uploadedAssets}
-        isUploading={isUploading}
-        tasks={uiTasks}
-        taskEvents={taskEvents}
-        connectionMode={connectionMode}
-        onUpload={handleUploadAsset}
-        onRemoveUpload={handleRemoveUpload}
-        onSubmitTask={handleSubmitTask}
-      />
-      <DetailPanel tasks={uiTasks} queueLength={queueLength} />
+    <div className="flex min-h-0 flex-col gap-4">
+      <div className="grid h-[calc(100vh-220px)] min-h-[640px] gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+        <SessionList
+          sessions={sessions}
+          activeId={activeId}
+          isLoading={listLoading}
+          error={listError}
+          onCreate={handleCreateSession}
+          onSelect={handleSelectSession}
+        />
+        <ChatPanel
+          session={activeSession}
+          models={models}
+          isLoading={detailLoading}
+          error={detailError}
+          uploadError={uploadError}
+          uploads={selectedAssets}
+          isUploading={isUploading}
+          tasks={uiTasks}
+          connectionMode={connectionMode}
+          composerDraft={composerContext ?? undefined}
+          composerSubmitLabel={composerContext?.submitLabel}
+          composerHint={composerContext?.hint ?? null}
+          onResetComposer={composerContext ? resetComposer : undefined}
+          onUpload={handleUploadAsset}
+          onRemoveUpload={handleRemoveUpload}
+          onSubmitTask={handleSubmitTask}
+          renderTaskActions={renderTaskActions}
+        />
+      </div>
+      <DetailPanel tasks={uiTasks} queueLength={queueLength} renderTaskActions={renderTaskActions} />
     </div>
   );
 }

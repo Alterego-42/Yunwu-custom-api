@@ -1,11 +1,22 @@
 import type { ReactNode } from "react";
 import { LoaderCircle } from "lucide-react";
-import { Navigate, RouterProvider, createBrowserRouter, useLocation } from "react-router-dom";
+import {
+  Navigate,
+  RouterProvider,
+  createBrowserRouter,
+  useLocation,
+  type RouteObject,
+} from "react-router-dom";
 
 import { AppShell } from "@/components/layout/app-shell";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { AdminPage } from "@/pages/admin-page";
+import { CreatePage } from "@/pages/create-page";
+import { HistoryPage } from "@/pages/history-page";
+import { HomePage } from "@/pages/home-page";
+import { LibraryPage } from "@/pages/library-page";
 import { LoginPage } from "@/pages/login-page";
+import { RegisterPage } from "@/pages/register-page";
 import { WorkspacePage } from "@/pages/workspace-page";
 
 function FullscreenState({ children }: { children: ReactNode }) {
@@ -37,7 +48,8 @@ function RequireAuth({ children }: { children: ReactNode }) {
 }
 
 function RequireAdmin({ children }: { children: ReactNode }) {
-  const { isAdmin, isLoading } = useAuth();
+  const location = useLocation();
+  const { isAdmin, isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
     return (
@@ -48,6 +60,10 @@ function RequireAdmin({ children }: { children: ReactNode }) {
     );
   }
 
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
   if (!isAdmin) {
     return <Navigate to="/" replace />;
   }
@@ -55,40 +71,82 @@ function RequireAdmin({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
-const router = createBrowserRouter([
-  {
-    path: "/login",
-    element: <LoginPage />,
-  },
-  {
-    path: "/",
-    element: (
-      <RequireAuth>
-        <AppShell />
-      </RequireAuth>
-    ),
-    children: [
-      {
-        index: true,
-        element: <WorkspacePage />,
-      },
-      {
-        path: "admin",
-        element: (
-          <RequireAdmin>
-            <AdminPage />
-          </RequireAdmin>
-        ),
-      },
-      {
-        path: "*",
-        element: <Navigate to="/" replace />,
-      },
-    ],
-  },
-]);
+function UserShellLayout() {
+  return <AppShell mode="user" />;
+}
+
+function AdminShellLayout() {
+  return <AppShell mode="admin" />;
+}
+
+export function createAppRoutes(): RouteObject[] {
+  return [
+    {
+      path: "/login",
+      element: <LoginPage />,
+    },
+    {
+      path: "/register",
+      element: <RegisterPage />,
+    },
+    {
+      path: "/",
+      element: (
+        <RequireAuth>
+          <UserShellLayout />
+        </RequireAuth>
+      ),
+      children: [
+        {
+          index: true,
+          element: <HomePage />,
+        },
+        {
+          path: "create",
+          element: <CreatePage />,
+        },
+        {
+          path: "workspace/:conversationId",
+          element: <WorkspacePage />,
+        },
+        {
+          path: "history",
+          element: <HistoryPage />,
+        },
+        {
+          path: "library",
+          element: <LibraryPage />,
+        },
+        {
+          path: "*",
+          element: <Navigate to="/" replace />,
+        },
+      ],
+    },
+    {
+      path: "/admin",
+      element: (
+        <RequireAdmin>
+          <AdminShellLayout />
+        </RequireAdmin>
+      ),
+      children: [
+        {
+          index: true,
+          element: <AdminPage />,
+        },
+      ],
+    },
+    {
+      path: "*",
+      element: <Navigate to="/" replace />,
+    },
+  ];
+}
 
 export function App() {
+  const router = createBrowserRouter(createAppRoutes());
+
   return (
     <AuthProvider>
       <RouterProvider router={router} />

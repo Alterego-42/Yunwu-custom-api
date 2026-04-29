@@ -27,6 +27,12 @@ enum AssetStatus {
   deleted
 }
 
+enum UserRole {
+  admin
+  demo
+  member
+}
+
 enum TaskStatus {
   queued
   submitted
@@ -38,18 +44,28 @@ enum TaskStatus {
   action_required
 }
 
+enum TaskSourceAction {
+  retry
+  edit
+  variant
+  fork
+}
+
 model User {
-  id            String         @id @default(cuid())
-  email         String?        @unique
-  displayName   String?        @map("display_name")
-  avatarUrl     String?        @map("avatar_url")
-  metadata      Json?
-  createdAt     DateTime       @default(now()) @map("created_at")
-  updatedAt     DateTime       @updatedAt @map("updated_at")
-  conversations Conversation[]
-  messages      Message[]
-  assets        Asset[]
-  tasks         Task[]
+  id                String         @id @default(cuid())
+  email             String?        @unique
+  displayName       String?        @map("display_name")
+  avatarUrl         String?        @map("avatar_url")
+  role              UserRole       @default(member)
+  passwordHash      String?        @map("password_hash")
+  passwordUpdatedAt DateTime?      @map("password_updated_at")
+  metadata          Json?
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+  conversations     Conversation[]
+  messages          Message[]
+  assets            Asset[]
+  tasks             Task[]
 
   @@map("users")
 }
@@ -111,24 +127,29 @@ model Asset {
 }
 
 model Task {
-  id             String        @id @default(cuid())
-  userId         String?       @map("user_id")
-  conversationId String?       @map("conversation_id")
+  id             String           @id @default(cuid())
+  userId         String?          @map("user_id")
+  conversationId String?          @map("conversation_id")
+  sourceTaskId   String?          @map("source_task_id")
+  sourceAction   TaskSourceAction? @map("source_action")
   type           String
-  status         TaskStatus    @default(queued)
-  progress       Int           @default(0)
+  status         TaskStatus       @default(queued)
+  progress       Int              @default(0)
   input          Json?
   output         Json?
-  errorMessage   String?       @map("error_message")
-  createdAt      DateTime      @default(now()) @map("created_at")
-  updatedAt      DateTime      @updatedAt @map("updated_at")
-  user           User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
-  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  errorMessage   String?          @map("error_message")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+  user           User?            @relation(fields: [userId], references: [id], onDelete: SetNull)
+  conversation   Conversation?    @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  sourceTask     Task?            @relation("TaskSource", fields: [sourceTaskId], references: [id], onDelete: SetNull)
+  derivedTasks   Task[]           @relation("TaskSource")
   assets         Asset[]
   events         TaskEvent[]
 
   @@index([userId])
   @@index([conversationId])
+  @@index([sourceTaskId])
   @@index([status])
   @@map("tasks")
 }

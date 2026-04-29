@@ -1,9 +1,13 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, Paperclip, SendHorizonal, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  getComposerSubmissionGuard,
+  resolveComposerCapability,
+} from "@/lib/api-mappers";
 import type { AssetRecord, CapabilityType, ModelRecord } from "@/lib/api-types";
 
 const capabilityOptions: Array<{ key: CapabilityType; label: string }> = [
@@ -25,6 +29,10 @@ export function Composer({
   uploads = [],
   uploadError,
   isUploading = false,
+  initialDraft,
+  placeholder,
+  submitLabel,
+  submitDisabledReason,
   onUpload,
   onRemoveUpload,
   onSubmit,
@@ -34,6 +42,15 @@ export function Composer({
   uploads?: AssetRecord[];
   uploadError?: string | null;
   isUploading?: boolean;
+  initialDraft?: {
+    prompt?: string;
+    model?: string;
+    capability?: CapabilityType;
+    params?: Record<string, unknown>;
+  };
+  placeholder?: string;
+  submitLabel?: string;
+  submitDisabledReason?: string;
   onUpload?: (file: File) => Promise<void>;
   onRemoveUpload?: (assetId: string) => void;
   onSubmit: (input: {
@@ -41,21 +58,57 @@ export function Composer({
     model: string;
     capability: CapabilityType;
     assetIds?: string[];
+    params?: Record<string, unknown>;
   }) => Promise<void>;
 }) {
   const enabledModels = useMemo(() => models.filter((item) => item.enabled), [models]);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [prompt, setPrompt] = useState("");
-  const [model, setModel] = useState("");
-  const [capability, setCapability] = useState<CapabilityType>("image.generate");
+  const initialSignature = JSON.stringify(initialDraft ?? {});
+  const [prompt, setPrompt] = useState(initialDraft?.prompt ?? "");
+  const [model, setModel] = useState(initialDraft?.model ?? "");
+  const [capability, setCapability] = useState<CapabilityType>(initialDraft?.capability ?? "image.generate");
+  const [params, setParams] = useState<Record<string, unknown>>(initialDraft?.params ?? {});
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    setPrompt(initialDraft?.prompt ?? "");
+    setModel(initialDraft?.model ?? "");
+    setCapability(initialDraft?.capability ?? "image.generate");
+    setParams(initialDraft?.params ?? {});
+  }, [initialSignature, initialDraft?.capability, initialDraft?.model, initialDraft?.params, initialDraft?.prompt]);
+
   const selectedModel = model || enabledModels[0]?.id || models[0]?.id || "";
-  const needsEditAsset = capability === "image.edit" && uploads.length === 0;
+  const effectiveCapability = resolveComposerCapability({
+    requestedCapability: capability,
+    assetCount: uploads.length,
+  });
+  const submissionGuard = getComposerSubmissionGuard({
+    models,
+    modelId: selectedModel,
+    requestedCapability: capability,
+    assetCount: uploads.length,
+  });
+  const needsEditAsset = effectiveCapability === "image.edit" && uploads.length === 0;
+  const uploadForcesEdit = uploads.length > 0;
+  const effectiveSubmitDisabledReason = submissionGuard.reason ?? submitDisabledReason ?? null;
+  const isSubmitDisabled =
+    !prompt.trim() ||
+    !selectedModel ||
+    disabled ||
+    isSubmitting ||
+    needsEditAsset ||
+    isUploading ||
+    Boolean(effectiveSubmitDisabledReason);
+
+  useEffect(() => {
+    if (uploadForcesEdit && capability !== "image.edit") {
+      setCapability("image.edit");
+    }
+  }, [capability, uploadForcesEdit]);
 
   async function handleSubmit() {
     const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || !selectedModel || disabled || isSubmitting || needsEditAsset || isUploading) {
+    if (isSubmitDisabled) {
       return;
     }
 
@@ -64,8 +117,9 @@ export function Composer({
       await onSubmit({
         prompt: trimmedPrompt,
         model: selectedModel,
-        capability,
+        capability: effectiveCapability,
         assetIds: uploads.map((asset) => asset.id),
+        params,
       });
       setPrompt("");
     } finally {
@@ -119,15 +173,27 @@ export function Composer({
           </div>
         ) : null}
 
+        {uploadForcesEdit ? (
+          <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-4 py-3 text-sm text-sky-100">
+            已检测到上传图，本次提交会按图片编辑处理；如需文生图，请先移除上传图。
+          </div>
+        ) : null}
+
         {uploadError ? (
           <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
             上传失败：{uploadError}
           </div>
         ) : null}
 
+        {submissionGuard.reason && !needsEditAsset ? (
+          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            {submissionGuard.reason}
+          </div>
+        ) : null}
+
         <Textarea
           className="min-h-[110px] resize-none border-white/10 bg-white/[0.03]"
-          placeholder="输入提示词、编辑指令或任务描述。发送后会创建真实任务。"
+          placeholder={placeholder ?? "输入提示词、编辑指令或任务描述。发送后会创建真实任务。"}
           value={prompt}
           onChange={(event) => setPrompt(event.target.value)}
           disabled={disabled || isSubmitting}
@@ -153,6 +219,7 @@ export function Composer({
             <label className="inline-flex items-center gap-2 rounded-md border border-border bg-background/60 px-3 py-2 text-xs text-muted-foreground">
               <span>模型</span>
               <select
+                aria-label="模型"
                 className="bg-transparent text-foreground outline-none"
                 value={selectedModel}
                 onChange={(event) => setModel(event.target.value)}
@@ -170,13 +237,18 @@ export function Composer({
             <label className="inline-flex items-center gap-2 rounded-md border border-border bg-background/60 px-3 py-2 text-xs text-muted-foreground">
               <span>能力</span>
               <select
+                aria-label="能力"
                 className="bg-transparent text-foreground outline-none"
-                value={capability}
+                value={effectiveCapability}
                 onChange={(event) => setCapability(event.target.value as CapabilityType)}
                 disabled={disabled || isSubmitting}
               >
                 {capabilityOptions.map((option) => (
-                  <option key={option.key} value={option.key}>
+                  <option
+                    key={option.key}
+                    value={option.key}
+                    disabled={uploadForcesEdit && option.key === "image.generate"}
+                  >
                     {option.label}
                   </option>
                 ))}
@@ -191,13 +263,19 @@ export function Composer({
             <Button
               size="sm"
               onClick={handleSubmit}
-              disabled={!prompt.trim() || !selectedModel || disabled || isSubmitting || needsEditAsset || isUploading}
+              disabled={isSubmitDisabled}
+              title={effectiveSubmitDisabledReason ?? undefined}
             >
               <SendHorizonal className="h-4 w-4" />
-              {isSubmitting ? "发送中..." : "发送"}
+              {isSubmitting ? "发送中..." : submitLabel ?? "发送"}
             </Button>
           </div>
         </div>
+        {submitDisabledReason && !submissionGuard.reason ? (
+          <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-muted-foreground">
+            {submitDisabledReason}
+          </div>
+        ) : null}
       </div>
     </Card>
   );

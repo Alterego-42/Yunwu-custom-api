@@ -1,5 +1,6 @@
 import {
   ArrayMaxSize,
+  IsBoolean,
   IsArray,
   IsIn,
   IsObject,
@@ -15,8 +16,9 @@ const SUPPORTED_TASK_CAPABILITIES: CapabilityType[] = [
 ];
 
 export class CreateTaskDto {
+  @IsOptional()
   @IsString()
-  conversationId!: string;
+  conversationId?: string;
 
   @IsIn(SUPPORTED_TASK_CAPABILITIES)
   capability!: CapabilityType;
@@ -37,4 +39,16 @@ export class CreateTaskDto {
   @IsOptional()
   @IsObject()
   params?: Record<string, unknown>;
+
+  @IsOptional()
+  @IsString()
+  sourceTaskId?: string;
+
+  @IsOptional()
+  @IsIn(["retry", "edit", "variant", "fork"])
+  sourceAction?: "retry" | "edit" | "variant" | "fork";
+
+  @IsOptional()
+  @IsBoolean()
+  fork?: boolean;
 }

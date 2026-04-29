@@ -21,6 +21,15 @@ export const TASK_STATUSES = [
   "action_required"
 ] as const;
 
+export const USER_ROLES = ["admin", "demo", "member"] as const;
+
+export const TASK_SOURCE_ACTIONS = [
+  "retry",
+  "edit",
+  "variant",
+  "fork"
+] as const;
+
 export const MESSAGE_TYPES = [
   "text",
   "image_result",

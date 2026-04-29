@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   MessageEvent,
@@ -25,8 +26,12 @@ import type {
   ConversationResponse,
   ConversationsResponse,
   CreateTaskResponse,
+  DeleteLibraryAssetResponse,
+  HistoryResponse,
+  HomeResponse,
   AdminModelCapabilitiesResponse,
   AdminModelCapabilityResponse,
+  LibraryResponse,
   ModelsResponse,
   ProviderAdminResponse,
   ProviderCheckResponse,
@@ -88,6 +93,29 @@ export class ApiController {
     @Param("id") id: string,
   ): Promise<ConversationResponse> {
     return this.api.getConversation(user, id);
+  }
+
+  @Get("home")
+  getHome(@CurrentUser() user: AuthenticatedUser): Promise<HomeResponse> {
+    return this.api.getHome(user);
+  }
+
+  @Get("history")
+  getHistory(@CurrentUser() user: AuthenticatedUser): Promise<HistoryResponse> {
+    return this.api.getHistory(user);
+  }
+
+  @Get("library")
+  getLibrary(@CurrentUser() user: AuthenticatedUser): Promise<LibraryResponse> {
+    return this.api.getLibrary(user);
+  }
+
+  @Delete("library/assets/:id")
+  deleteLibraryAsset(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ): Promise<DeleteLibraryAssetResponse> {
+    return this.api.deleteLibraryAsset(user, id);
   }
 
   @Get("conversations/:id/task-events")
@@ -172,9 +200,11 @@ export class ApiController {
   }
 
   @Post("tasks/:id/retry")
-  @Roles("admin")
-  retryTask(@Param("id") id: string): Promise<RetryTaskResponse> {
-    return this.api.retryFailedTask(id);
+  retryTask(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ): Promise<RetryTaskResponse> {
+    return this.api.retryFailedTask(user, id);
   }
 
   @Get("tasks/:id")

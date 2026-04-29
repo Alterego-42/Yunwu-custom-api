@@ -3,7 +3,9 @@ import {
   CAPABILITY_TYPES,
   MESSAGE_TYPES,
   MODEL_TYPES,
-  TASK_STATUSES
+  TASK_SOURCE_ACTIONS,
+  TASK_STATUSES,
+  USER_ROLES,
 } from "./constants";
 import type {
   AssetRecord,
@@ -12,9 +14,11 @@ import type {
   MessageType,
   ModelRecord,
   ModelType,
+  TaskSourceAction,
   TaskMessage,
   TaskRecord,
-  TaskStatus
+  TaskStatus,
+  UserRole
 } from "./types";
 
 const DEFAULT_TIMESTAMP = "2026-01-01T00:00:00.000Z";
@@ -24,6 +28,14 @@ export const isCapabilityType = (value: string): value is CapabilityType =>
 
 export const isTaskStatus = (value: string): value is TaskStatus =>
   TASK_STATUSES.includes(value as TaskStatus);
+
+export const isUserRole = (value: string): value is UserRole =>
+  USER_ROLES.includes(value as UserRole);
+
+export const isTaskSourceAction = (
+  value: string
+): value is TaskSourceAction =>
+  TASK_SOURCE_ACTIONS.includes(value as TaskSourceAction);
 
 export const isMessageType = (value: string): value is MessageType =>
   MESSAGE_TYPES.includes(value as MessageType);

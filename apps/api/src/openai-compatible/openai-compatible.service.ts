@@ -7,7 +7,7 @@ import type {
 } from "@yunwu/shared";
 import { createHash, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { cwd } from "node:process";
 
 export interface OpenAICompatibleImageRequest {
@@ -444,7 +444,11 @@ export class OpenAICompatibleService {
 
   private getLocalStoragePath() {
     const configured = this.config.get<string>("storage.local.path");
-    return join(cwd(), configured ?? "storage");
+    if (!configured) {
+      return join(cwd(), "storage");
+    }
+
+    return isAbsolute(configured) ? resolve(configured) : join(cwd(), configured);
   }
 
   private getApiKey() {

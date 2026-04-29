@@ -3,14 +3,24 @@ import type {
   CAPABILITY_TYPES,
   MESSAGE_TYPES,
   MODEL_TYPES,
-  TASK_STATUSES
+  TASK_SOURCE_ACTIONS,
+  TASK_STATUSES,
+  USER_ROLES,
 } from "./constants";
 
 export type CapabilityType = (typeof CAPABILITY_TYPES)[number];
 export type TaskStatus = (typeof TASK_STATUSES)[number];
+export type UserRole = (typeof USER_ROLES)[number];
+export type TaskSourceAction = (typeof TASK_SOURCE_ACTIONS)[number];
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 export type ModelType = (typeof MODEL_TYPES)[number];
 export type AssetType = (typeof ASSET_TYPES)[number];
+
+export interface ConversationMetadata {
+  forkedFromConversationId?: string;
+  forkedFromTaskId?: string;
+  [key: string]: unknown;
+}
 
 export interface TaskMessage {
   id: string;
@@ -22,6 +32,7 @@ export interface TaskMessage {
 export interface ConversationSummary {
   id: string;
   title: string;
+  metadata?: ConversationMetadata;
   updatedAt: string;
   createdAt: string;
 }
@@ -38,6 +49,8 @@ export interface TaskRecord {
   status: TaskStatus;
   modelId: string;
   prompt: string;
+  sourceTaskId?: string;
+  sourceAction?: TaskSourceAction;
   createdAt: string;
   updatedAt: string;
   errorMessage?: string;
@@ -72,12 +85,15 @@ export interface CreateConversationInput {
 }
 
 export interface CreateTaskInput {
-  conversationId: string;
+  conversationId?: string;
   capability: CapabilityType;
   model: string;
   prompt: string;
   assetIds?: string[];
   params?: Record<string, unknown>;
+  sourceTaskId?: string;
+  sourceAction?: TaskSourceAction;
+  fork?: boolean;
 }
 
 export interface UploadAssetResponse {

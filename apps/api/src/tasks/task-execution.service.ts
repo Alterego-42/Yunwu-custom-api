@@ -69,19 +69,22 @@ export class TaskExecutionService {
     this.publishTaskUpdated(task.conversationId, task.id, "submitted");
 
     try {
-      const inputAssets =
-        task.assets.length > 0
-          ? task.assets.filter((asset) => asset.type === "upload")
-          : input.assetIds?.length
-            ? await this.prisma.asset.findMany({
-                where: {
-                  id: { in: input.assetIds },
-                  userId: task.userId,
-                  status: "ready",
-                  type: "upload",
-                },
-              })
-            : [];
+      const inputAssets = input.assetIds?.length
+        ? await this.prisma.asset.findMany({
+            where: {
+              id: { in: input.assetIds },
+              userId: task.userId,
+              status: { in: ["ready", "deleted"] },
+              type: { in: ["upload", "generated"] },
+            },
+          })
+        : [];
+      const inputAssetsById = new Map(
+        inputAssets.map((asset) => [asset.id, asset]),
+      );
+      const orderedInputAssets = (input.assetIds ?? [])
+        .map((assetId) => inputAssetsById.get(assetId))
+        .filter((asset): asset is Asset => Boolean(asset));
 
       await this.prisma.task.update({
         where: { id: task.id },
@@ -101,7 +104,7 @@ export class TaskExecutionService {
       const requestSummary = this.buildProviderRequestSummary(
         capability,
         input,
-        inputAssets,
+        orderedInputAssets,
       );
       await this.recordTaskEvent(task.id, "provider.request", "running", {
         summary: "Sanitized upstream request summary recorded.",
@@ -112,7 +115,7 @@ export class TaskExecutionService {
         capability,
         model: input.model ?? "gpt-image-1",
         prompt: input.prompt ?? "",
-        inputAssets: inputAssets.map((asset) => ({
+        inputAssets: orderedInputAssets.map((asset) => ({
           id: asset.id,
           url: asset.url,
           mimeType: asset.mimeType,
@@ -150,7 +153,7 @@ export class TaskExecutionService {
           progress: 100,
           output: {
             assetIds: [asset.id],
-            inputAssetIds: inputAssets.map((item) => item.id),
+            inputAssetIds: orderedInputAssets.map((item) => item.id),
             mocked: result.mocked,
           },
         },
@@ -175,7 +178,7 @@ export class TaskExecutionService {
             type: "image_result",
             taskId: task.id,
             assetIds: [asset.id],
-            inputAssetIds: inputAssets.map((item) => item.id),
+            inputAssetIds: orderedInputAssets.map((item) => item.id),
           },
         },
       });

@@ -1,5 +1,4 @@
 import type {
-  ApiTask,
   AdminProviderAlert,
   AdminProviderAlertSummary,
   AdminModelCapabilityRecord,
@@ -12,7 +11,13 @@ import type {
   CreateConversationInput,
   CreateTaskInput,
   CreateTaskResponse,
+  DeleteLibraryAssetResponse,
+  HistoryResponse,
+  HomeResponse,
+  LibraryResponse,
   ModelRecord,
+  RetryTaskResponse,
+  TaskRecord,
   TaskEventRecord,
   UploadAssetResponse,
 } from "@/lib/api-types";
@@ -51,11 +56,17 @@ function getDefaultApiBaseUrl() {
 }
 
 const RAW_API_BASE_URL = normalizeLoopbackApiBaseUrl(
-  (import.meta.env.VITE_API_BASE_URL ?? getDefaultApiBaseUrl()).replace(/\/$/, ""),
+  (import.meta.env.VITE_API_BASE_URL ?? getDefaultApiBaseUrl()).replace(
+    /\/$/,
+    "",
+  ),
 );
-const API_ROOT = RAW_API_BASE_URL.endsWith("/api") ? RAW_API_BASE_URL : `${RAW_API_BASE_URL}/api`;
+const API_ROOT = RAW_API_BASE_URL.endsWith("/api")
+  ? RAW_API_BASE_URL
+  : `${RAW_API_BASE_URL}/api`;
 const RAW_SSE_PATH_TEMPLATE =
-  import.meta.env.VITE_CONVERSATION_SSE_PATH_TEMPLATE ?? "/conversations/:id/events";
+  import.meta.env.VITE_CONVERSATION_SSE_PATH_TEMPLATE ??
+  "/conversations/:id/events";
 
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
@@ -100,7 +111,10 @@ async function request<T>(
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   });
 
-  if (config.allowUnauthorized && (response.status === 401 || response.status === 403)) {
+  if (
+    config.allowUnauthorized &&
+    (response.status === 401 || response.status === 403)
+  ) {
     return undefined as T;
   }
 
@@ -108,8 +122,13 @@ async function request<T>(
     let message = `API request failed: ${response.status}`;
 
     try {
-      const body = (await response.json()) as { message?: string | string[]; error?: string };
-      const bodyMessage = Array.isArray(body.message) ? body.message.join("; ") : body.message;
+      const body = (await response.json()) as {
+        message?: string | string[];
+        error?: string;
+      };
+      const bodyMessage = Array.isArray(body.message)
+        ? body.message.join("; ")
+        : body.message;
       message = bodyMessage ?? body.error ?? message;
     } catch {
       // Keep the status-based message when the response is not JSON.
@@ -136,8 +155,13 @@ async function requestForm<T>(path: string, formData: FormData): Promise<T> {
     let message = `API request failed: ${response.status}`;
 
     try {
-      const body = (await response.json()) as { message?: string | string[]; error?: string };
-      const bodyMessage = Array.isArray(body.message) ? body.message.join("; ") : body.message;
+      const body = (await response.json()) as {
+        message?: string | string[];
+        error?: string;
+      };
+      const bodyMessage = Array.isArray(body.message)
+        ? body.message.join("; ")
+        : body.message;
       message = bodyMessage ?? body.error ?? message;
     } catch {
       // Keep the status-based message when the response is not JSON.
@@ -205,12 +229,10 @@ function normalizeProviderModelAvailability(
     return undefined;
   }
 
-  return value
-    .filter(isRecord)
-    .map((item) => ({
-      ...item,
-      capabilityTypes: normalizeStringArray(item.capabilityTypes),
-    })) as AdminProviderModelAvailability[];
+  return value.filter(isRecord).map((item) => ({
+    ...item,
+    capabilityTypes: normalizeStringArray(item.capabilityTypes),
+  })) as AdminProviderModelAvailability[];
 }
 
 function normalizeAdminProviderAlerts(
@@ -225,23 +247,23 @@ function normalizeAdminProviderAlerts(
     .map(
       (item) =>
         ({
-      ...item,
-      id:
-        typeof item.id === "string"
-          ? item.id
-          : typeof item.alertId === "string"
-            ? item.alertId
-            : "",
-      taskId:
-        typeof item.taskId === "string"
-          ? item.taskId
-          : isRecord(item.task) && typeof item.task.id === "string"
-            ? item.task.id
-            : null,
-      task:
-        isRecord(item.task) && typeof item.task.id === "string"
-          ? ({ id: item.task.id } as Pick<ApiTask, "id">)
-          : null,
+          ...item,
+          id:
+            typeof item.id === "string"
+              ? item.id
+              : typeof item.alertId === "string"
+                ? item.alertId
+                : "",
+          taskId:
+            typeof item.taskId === "string"
+              ? item.taskId
+              : isRecord(item.task) && typeof item.task.id === "string"
+                ? item.task.id
+                : null,
+          task:
+            isRecord(item.task) && typeof item.task.id === "string"
+              ? ({ id: item.task.id } as Pick<TaskRecord, "id">)
+              : null,
         }) as AdminProviderAlert,
     )
     .filter((item) => Boolean(item.id));
@@ -261,16 +283,15 @@ function normalizeAdminProviderTestResultFields(
   value: Record<string, unknown>,
 ): AdminProviderTestGenerateResult {
   const error = isRecord(value.error) ? value.error : undefined;
-  const task = isRecord(value.task) ? (value.task as unknown as ApiTask) : undefined;
+  const task = isRecord(value.task)
+    ? (value.task as unknown as TaskRecord)
+    : undefined;
   const test = isRecord(value.test) ? value.test : undefined;
 
   return {
     ...value,
     task,
-    taskId:
-      typeof value.taskId === "string"
-        ? value.taskId
-        : task?.id,
+    taskId: typeof value.taskId === "string" ? value.taskId : task?.id,
     status:
       typeof value.status === "string"
         ? value.status
@@ -306,14 +327,19 @@ function normalizeAdminProviderTestResultFields(
 
 function normalizeAdminProviderStatus(payload: unknown): AdminProviderStatus {
   const root = isRecord(payload) ? payload : undefined;
-  const status = unwrapObjectWithKeys<AdminProviderStatus>(payload, ["provider", "status"]);
+  const status = unwrapObjectWithKeys<AdminProviderStatus>(payload, [
+    "provider",
+    "status",
+  ]);
 
   if (!isRecord(status)) {
     return status;
   }
 
   const statusRecord = status as Record<string, unknown>;
-  const defaultModels = isRecord(statusRecord.defaultModels) ? statusRecord.defaultModels : {};
+  const defaultModels = isRecord(statusRecord.defaultModels)
+    ? statusRecord.defaultModels
+    : {};
   const lastCheck = isRecord(statusRecord.lastCheck)
     ? normalizeAdminProviderCheckResult(statusRecord.lastCheck)
     : undefined;
@@ -323,7 +349,9 @@ function normalizeAdminProviderStatus(payload: unknown): AdminProviderStatus {
   const modelAvailability = normalizeProviderModelAvailability(
     statusRecord.modelAvailability ?? statusRecord.modelAvailabilities,
   );
-  const warnings = Array.isArray(statusRecord.warnings) ? statusRecord.warnings : undefined;
+  const warnings = Array.isArray(statusRecord.warnings)
+    ? statusRecord.warnings
+    : undefined;
   const alerts = normalizeAdminProviderAlerts(
     statusRecord.alerts ?? root?.alerts ?? root?.providerAlerts,
   );
@@ -368,8 +396,12 @@ function normalizeAdminProviderCheckResult(
   ]);
   const normalizedCheck: Record<string, unknown> = isRecord(check) ? check : {};
   const status =
-    typeof normalizedCheck.status === "string" ? normalizedCheck.status : undefined;
-  const error = isRecord(normalizedCheck.error) ? normalizedCheck.error : undefined;
+    typeof normalizedCheck.status === "string"
+      ? normalizedCheck.status
+      : undefined;
+  const error = isRecord(normalizedCheck.error)
+    ? normalizedCheck.error
+    : undefined;
 
   return {
     ...normalizedCheck,
@@ -449,11 +481,26 @@ export const apiClient = {
   },
 
   async getSession() {
-    return request<SessionResponse | null>("/auth/me", {}, { allowUnauthorized: true });
+    return request<SessionResponse | null>(
+      "/auth/me",
+      {},
+      { allowUnauthorized: true },
+    );
   },
 
   async login(input: { email: string; password: string }) {
     return request<SessionResponse>("/auth/login", {
+      method: "POST",
+      body: input,
+    });
+  },
+
+  async register(input: {
+    email: string;
+    password: string;
+    displayName?: string;
+  }) {
+    return request<SessionResponse>("/auth/register", {
       method: "POST",
       body: input,
     });
@@ -475,14 +522,20 @@ export const apiClient = {
   },
 
   async getConversation(id: string) {
-    const payload = await request<unknown>(`/conversations/${encodeURIComponent(id)}`);
+    const payload = await request<unknown>(
+      `/conversations/${encodeURIComponent(id)}`,
+    );
     return unwrapObject<ConversationDetail>(payload, "conversation");
   },
 
   async listConversationTaskEvents(id: string) {
-    const payload = await request<unknown>(`/conversations/${encodeURIComponent(id)}/task-events`);
+    const payload = await request<unknown>(
+      `/conversations/${encodeURIComponent(id)}/task-events`,
+    );
     const events = unwrapList<TaskEventRecord>(payload, "events");
-    return events.length > 0 ? events : unwrapList<TaskEventRecord>(payload, "taskEvents");
+    return events.length > 0
+      ? events
+      : unwrapList<TaskEventRecord>(payload, "taskEvents");
   },
 
   async createConversation(input: CreateConversationInput) {
@@ -500,19 +553,24 @@ export const apiClient = {
 
   async listTasks() {
     const payload = await request<unknown>("/tasks");
-    return unwrapList<ApiTask>(payload, "tasks");
+    return unwrapList<TaskRecord>(payload, "tasks");
   },
 
   async getTaskEvents(id: string) {
-    const payload = await request<unknown>(`/tasks/${encodeURIComponent(id)}/events`);
+    const payload = await request<unknown>(
+      `/tasks/${encodeURIComponent(id)}/events`,
+    );
     return unwrapList<TaskEventRecord>(payload, "events");
   },
 
   async retryTask(id: string) {
-    const payload = await request<unknown>(`/tasks/${encodeURIComponent(id)}/retry`, {
-      method: "POST",
-    });
-    return unwrapObject<ApiTask>(payload, "task");
+    const payload = await request<RetryTaskResponse>(
+      `/tasks/${encodeURIComponent(id)}/retry`,
+      {
+        method: "POST",
+      },
+    );
+    return payload.task;
   },
 
   async listAdminModelCapabilities() {
@@ -540,16 +598,22 @@ export const apiClient = {
   },
 
   async acknowledgeAdminProviderAlert(id: string) {
-    await request<void>(`/admin/provider/alerts/${encodeURIComponent(id)}/ack`, {
-      method: "POST",
-    });
+    await request<void>(
+      `/admin/provider/alerts/${encodeURIComponent(id)}/ack`,
+      {
+        method: "POST",
+      },
+    );
   },
 
   async updateAdminModelCapability(id: string, input: { enabled: boolean }) {
-    const payload = await request<unknown>(`/admin/model-capabilities/${encodeURIComponent(id)}`, {
-      method: "PATCH",
-      body: input,
-    });
+    const payload = await request<unknown>(
+      `/admin/model-capabilities/${encodeURIComponent(id)}`,
+      {
+        method: "PATCH",
+        body: input,
+      },
+    );
     return unwrapObject<AdminModelCapabilityRecord>(payload, "modelCapability");
   },
 
@@ -573,7 +637,28 @@ export const apiClient = {
 
   async getTask(id: string) {
     const payload = await request<unknown>(`/tasks/${encodeURIComponent(id)}`);
-    return unwrapObject<ApiTask>(payload, "task");
+    return unwrapObject<TaskRecord>(payload, "task");
+  },
+
+  async getHome() {
+    return request<HomeResponse>("/home");
+  },
+
+  async getHistory() {
+    return request<HistoryResponse>("/history");
+  },
+
+  async getLibrary() {
+    return request<LibraryResponse>("/library");
+  },
+
+  async deleteLibraryAsset(id: string) {
+    return request<DeleteLibraryAssetResponse>(
+      `/library/assets/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+      },
+    );
   },
 };
 

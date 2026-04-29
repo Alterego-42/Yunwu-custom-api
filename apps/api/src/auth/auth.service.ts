@@ -1,9 +1,12 @@
 import {
+  ConflictException,
   Injectable,
   OnModuleInit,
   UnauthorizedException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
+import { Prisma, type User } from "@prisma/client";
+import * as argon2 from "argon2";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { PrismaService } from "../prisma/prisma.service";
 import type { AuthenticatedUser, UserRole } from "./auth.types";
@@ -16,13 +19,18 @@ interface BuiltInAccount {
 }
 
 interface SessionPayload {
-  email: string;
+  userId: string;
   role: UserRole;
   exp: number;
 }
 
 interface RequestLike {
   headers?: Record<string, string | string[] | undefined>;
+}
+
+interface SessionResolution {
+  user: AuthenticatedUser | null;
+  shouldClearCookie: boolean;
 }
 
 @Injectable()
@@ -36,45 +44,102 @@ export class AuthService implements OnModuleInit {
     await this.ensureBuiltInUsers();
   }
 
+  async register(
+    email: string,
+    password: string,
+    displayName?: string,
+  ): Promise<AuthenticatedUser> {
+    const normalizedEmail = this.normalizeEmail(email);
+    const existingUser = await this.findUserByEmail(normalizedEmail);
+    if (existingUser) {
+      throw new ConflictException("Email already registered.");
+    }
+
+    try {
+      const user = await this.prisma.user.create({
+        data: {
+          email: normalizedEmail,
+          displayName:
+            this.normalizeDisplayName(displayName) ??
+            this.buildDefaultDisplayName(normalizedEmail),
+          role: "member",
+          passwordHash: await this.hashPassword(password),
+          passwordUpdatedAt: new Date(),
+        },
+      });
+
+      return this.toAuthenticatedUser(user);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        throw new ConflictException("Email already registered.");
+      }
+
+      throw error;
+    }
+  }
+
   async login(email: string, password: string): Promise<AuthenticatedUser> {
-    const account = this.getBuiltInAccounts().find(
-      (item) => item.email.toLowerCase() === email.trim().toLowerCase(),
-    );
-    if (!account || !this.secureEquals(account.password, password)) {
+    const user = await this.findUserByEmail(email);
+    if (!user?.passwordHash) {
       throw new UnauthorizedException("Invalid email or password.");
     }
 
-    return this.upsertBuiltInUser(account);
+    const isPasswordValid = await this.verifyPassword(
+      user.passwordHash,
+      password.trim(),
+    );
+    if (!isPasswordValid) {
+      throw new UnauthorizedException("Invalid email or password.");
+    }
+
+    return this.toAuthenticatedUser(user);
   }
 
   async authenticateRequest(
     request: RequestLike,
   ): Promise<AuthenticatedUser | null> {
+    return (await this.resolveSession(request)).user;
+  }
+
+  async resolveSession(request: RequestLike): Promise<SessionResolution> {
     const token = this.readSessionToken(request);
     if (!token) {
-      return null;
+      return {
+        user: null,
+        shouldClearCookie: false,
+      };
     }
 
     const payload = this.verifySessionToken(token);
     if (!payload || payload.exp <= Date.now()) {
-      return null;
+      return {
+        user: null,
+        shouldClearCookie: true,
+      };
     }
 
-    const account = this.getBuiltInAccounts().find(
-      (item) =>
-        item.email.toLowerCase() === payload.email.toLowerCase() &&
-        item.role === payload.role,
-    );
-    if (!account) {
-      return null;
+    const user = await this.prisma.user.findUnique({
+      where: { id: payload.userId },
+    });
+    if (!user || !user.email || user.role !== payload.role) {
+      return {
+        user: null,
+        shouldClearCookie: true,
+      };
     }
 
-    return this.upsertBuiltInUser(account);
+    return {
+      user: this.toAuthenticatedUser(user),
+      shouldClearCookie: false,
+    };
   }
 
   createSessionToken(user: AuthenticatedUser): string {
     const payload: SessionPayload = {
-      email: user.email,
+      userId: user.id,
       role: user.role,
       exp: Date.now() + this.getSessionTtlMs(),
     };
@@ -125,31 +190,83 @@ export class AuthService implements OnModuleInit {
 
   private async ensureBuiltInUsers() {
     await Promise.all(
-      this.getBuiltInAccounts().map((account) => this.upsertBuiltInUser(account)),
+      this.getBuiltInAccounts().map((account) => this.syncBuiltInUser(account)),
     );
   }
 
-  private async upsertBuiltInUser(
+  private async syncBuiltInUser(
     account: BuiltInAccount,
   ): Promise<AuthenticatedUser> {
-    const user = await this.prisma.user.upsert({
-      where: { email: account.email },
-      update: {
-        displayName: account.displayName,
-        metadata: { role: account.role },
-      },
-      create: {
-        email: account.email,
-        displayName: account.displayName,
-        metadata: { role: account.role },
-      },
+    const normalizedEmail = this.normalizeEmail(account.email);
+    const existingUser = await this.findUserByEmail(normalizedEmail);
+    const shouldRotatePassword =
+      !existingUser?.passwordHash ||
+      !(await this.verifyPassword(existingUser.passwordHash, account.password));
+
+    if (!existingUser) {
+      const user = await this.prisma.user.create({
+        data: {
+          email: normalizedEmail,
+          displayName: account.displayName,
+          role: account.role,
+          passwordHash: await this.hashPassword(account.password),
+          passwordUpdatedAt: new Date(),
+        },
+      });
+
+      return this.toAuthenticatedUser(user);
+    }
+
+    const data: Prisma.UserUpdateInput = {};
+    if (existingUser.email !== normalizedEmail) {
+      data.email = normalizedEmail;
+    }
+    if (existingUser.displayName !== account.displayName) {
+      data.displayName = account.displayName;
+    }
+    if (existingUser.role !== account.role) {
+      data.role = account.role;
+    }
+    if (shouldRotatePassword) {
+      data.passwordHash = await this.hashPassword(account.password);
+      data.passwordUpdatedAt = new Date();
+    }
+
+    if (Object.keys(data).length === 0) {
+      return this.toAuthenticatedUser(existingUser);
+    }
+
+    const user = await this.prisma.user.update({
+      where: { id: existingUser.id },
+      data,
     });
 
+    return this.toAuthenticatedUser(user);
+  }
+
+  private async findUserByEmail(email: string) {
+    const normalizedEmail = this.normalizeEmail(email);
+    return this.prisma.user.findFirst({
+      where: {
+        email: {
+          equals: normalizedEmail,
+          mode: "insensitive",
+        },
+      },
+    });
+  }
+
+  private toAuthenticatedUser(
+    user: Pick<User, "id" | "email" | "displayName" | "role">,
+  ): AuthenticatedUser {
+    const email = user.email ?? "";
     return {
       id: user.id,
-      email: user.email ?? account.email,
-      displayName: user.displayName ?? account.displayName,
-      role: account.role,
+      email,
+      displayName:
+        this.normalizeDisplayName(user.displayName) ??
+        this.buildDefaultDisplayName(email),
+      role: user.role,
     };
   }
 
@@ -187,8 +304,10 @@ export class AuthService implements OnModuleInit {
         Buffer.from(encodedPayload, "base64url").toString("utf8"),
       ) as SessionPayload;
       if (
-        typeof payload.email !== "string" ||
-        (payload.role !== "admin" && payload.role !== "demo") ||
+        typeof payload.userId !== "string" ||
+        (payload.role !== "admin" &&
+          payload.role !== "demo" &&
+          payload.role !== "member") ||
         typeof payload.exp !== "number"
       ) {
         return null;
@@ -230,10 +349,7 @@ export class AuthService implements OnModuleInit {
     return [
       {
         email: this.config.get<string>("auth.admin.email", "admin@yunwu.local"),
-        password: this.config.get<string>(
-          "auth.admin.password",
-          "admin123456",
-        ),
+        password: this.config.get<string>("auth.admin.password", "admin123456"),
         displayName: this.config.get<string>(
           "auth.admin.displayName",
           "Administrator",
@@ -250,6 +366,32 @@ export class AuthService implements OnModuleInit {
         role: "demo",
       },
     ];
+  }
+
+  private normalizeEmail(email: string) {
+    return email.trim().toLowerCase();
+  }
+
+  private normalizeDisplayName(displayName?: string | null) {
+    const value = displayName?.trim();
+    return value ? value : null;
+  }
+
+  private buildDefaultDisplayName(email: string) {
+    const localPart = email.split("@")[0]?.trim();
+    return localPart || "User";
+  }
+
+  private async hashPassword(password: string) {
+    return argon2.hash(password.trim());
+  }
+
+  private async verifyPassword(passwordHash: string, password: string) {
+    try {
+      return await argon2.verify(passwordHash, password.trim());
+    } catch {
+      return false;
+    }
   }
 
   private secureEquals(left: string, right: string) {

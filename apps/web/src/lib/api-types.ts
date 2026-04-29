@@ -1,21 +1,48 @@
 import type {
   AssetRecord,
   CapabilityType,
+  ConversationMetadata,
   ModelRecord,
   TaskMessage,
-  TaskRecord,
+  TaskRecord as SharedTaskRecord,
+  TaskSourceAction,
   TaskStatus,
 } from "@yunwu/shared";
+
+export type ApiTaskFailure = {
+  category: string;
+  retryable: boolean;
+  title?: string;
+  detail?: string;
+  statusCode?: number;
+};
 
 export type ConversationSummary = {
   id: string;
   title: string;
+  metadata?: ConversationMetadata;
   summary?: string;
   status?: "idle" | "running" | "done";
   model?: string;
   createdAt?: string;
   updatedAt: string;
 };
+
+export type TaskRecord = SharedTaskRecord & {
+  params?: Record<string, unknown>;
+  failure?: ApiTaskFailure;
+  canRetry?: boolean;
+  progress?: number;
+  conversationId?: string;
+  conversationTitle?: string;
+  userId?: string;
+  userEmail?: string;
+  userDisplayName?: string;
+  inputSummary?: Record<string, unknown>;
+  outputSummary?: Record<string, unknown>;
+};
+
+export type ApiTask = TaskRecord;
 
 export type ConversationDetail = ConversationSummary & {
   messages: TaskMessage[];
@@ -28,12 +55,15 @@ export type CreateConversationInput = {
 };
 
 export type CreateTaskInput = {
-  conversationId: string;
+  conversationId?: string;
   capability: CapabilityType;
   model: string;
   prompt: string;
   assetIds?: string[];
   params?: Record<string, unknown>;
+  sourceTaskId?: string;
+  sourceAction?: TaskSourceAction;
+  fork?: boolean;
 };
 
 export type CreateTaskResponse = {
@@ -41,19 +71,38 @@ export type CreateTaskResponse = {
   conversation: ConversationDetail;
 };
 
+export type RetryTaskResponse = {
+  task: TaskRecord;
+  retriedFromTaskId: string;
+};
+
 export type UploadAssetResponse = {
   asset: AssetRecord;
 };
 
-export type ApiTask = TaskRecord & {
-  progress?: number;
-  conversationId?: string;
-  conversationTitle?: string;
-  userId?: string;
-  userEmail?: string;
-  userDisplayName?: string;
-  inputSummary?: Record<string, unknown>;
-  outputSummary?: Record<string, unknown>;
+export type LibraryItemRecord = {
+  asset: AssetRecord;
+  task: TaskRecord;
+  conversation?: ConversationSummary;
+};
+
+export type HomeResponse = {
+  recentConversations: ConversationSummary[];
+  recentTasks: TaskRecord[];
+  recentAssets: LibraryItemRecord[];
+  recoveryTasks: TaskRecord[];
+};
+
+export type HistoryResponse = {
+  items: TaskRecord[];
+};
+
+export type LibraryResponse = {
+  items: LibraryItemRecord[];
+};
+
+export type DeleteLibraryAssetResponse = {
+  asset: AssetRecord;
 };
 
 export type TaskEventRecord = {
@@ -113,7 +162,7 @@ export type AdminProviderAlert = {
   severity?: AdminProviderAlertSeverity;
   status?: string;
   taskId?: string | null;
-  task?: Pick<ApiTask, "id"> | null;
+  task?: Pick<TaskRecord, "id"> | null;
   createdAt?: string;
   updatedAt?: string;
   detectedAt?: string;
@@ -191,7 +240,7 @@ export type AdminProviderCheckResult = {
 export type AdminProviderTestGenerateResult = {
   ok?: boolean;
   taskId?: string;
-  task?: ApiTask;
+  task?: TaskRecord;
   status?: string;
   message?: string;
   errorSummary?: string;
@@ -230,6 +279,16 @@ export type UiTask = {
   summary?: string;
   inputAssets?: UiTaskAsset[];
   resultAssets?: UiTaskAsset[];
+  assetIds?: string[];
+  params?: Record<string, unknown>;
+  failure?: ApiTaskFailure;
+  canRetry?: boolean;
+  conversationId?: string;
+  conversationTitle?: string;
+  sourceTaskId?: string;
+  sourceAction?: TaskSourceAction;
+  outputSummary?: Record<string, unknown>;
+  inputSummary?: Record<string, unknown>;
 };
 
 export type UiImageResult = {
@@ -241,4 +300,12 @@ export type UiImageResult = {
   url?: string;
 };
 
-export type { AssetRecord, CapabilityType, ModelRecord, TaskMessage, TaskRecord, TaskStatus };
+export type {
+  AssetRecord,
+  CapabilityType,
+  ConversationMetadata,
+  ModelRecord,
+  TaskMessage,
+  TaskSourceAction,
+  TaskStatus,
+};

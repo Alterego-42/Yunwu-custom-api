@@ -16,6 +16,10 @@ interface RequestWithAuth {
   headers?: Record<string, string | string[] | undefined>;
 }
 
+interface ResponseLike {
+  setHeader(name: string, value: string): void;
+}
+
 @Injectable()
 export class AuthGuard implements CanActivate {
   constructor(
@@ -29,18 +33,28 @@ export class AuthGuard implements CanActivate {
     }
 
     const request = context.switchToHttp().getRequest<RequestWithAuth>();
-    const isPublic = this.reflector.getAllAndOverride<boolean>(AUTH_PUBLIC_KEY, [
-      context.getHandler(),
-      context.getClass(),
-    ]);
+    const isPublic = this.reflector.getAllAndOverride<boolean>(
+      AUTH_PUBLIC_KEY,
+      [context.getHandler(), context.getClass()],
+    );
     if (isPublic || !request.path?.startsWith("/api")) {
       return true;
     }
 
-    const user = await this.authService.authenticateRequest(request);
-    if (!user) {
+    const response = context.switchToHttp().getResponse<ResponseLike>();
+    const session = await this.authService.resolveSession(request);
+    if (session.shouldClearCookie) {
+      response.setHeader(
+        "Set-Cookie",
+        this.authService.createExpiredSessionCookie(),
+      );
+    }
+
+    if (!session.user) {
       throw new UnauthorizedException("Authentication required.");
     }
+
+    const user = session.user;
 
     const requiredRoles =
       this.reflector.getAllAndOverride<UserRole[]>(AUTH_ROLES_KEY, [
@@ -48,7 +62,7 @@ export class AuthGuard implements CanActivate {
         context.getClass(),
       ]) ?? [];
     if (requiredRoles.length > 0 && !requiredRoles.includes(user.role)) {
-      throw new ForbiddenException("Admin access required.");
+      throw new ForbiddenException("Insufficient permissions.");
     }
 
     request.user = user;

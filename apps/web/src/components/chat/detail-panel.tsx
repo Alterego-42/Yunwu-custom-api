@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Gauge, ListTodo, SlidersHorizontal } from "lucide-react";
 
 import { TaskCard } from "@/components/cards/task-card";
@@ -9,9 +10,11 @@ import type { UiTask } from "@/lib/api-types";
 export function DetailPanel({
   tasks,
   queueLength,
+  renderTaskActions,
 }: {
   tasks: UiTask[];
   queueLength: number;
+  renderTaskActions?: (task: UiTask) => ReactNode;
 }) {
   const succeededCount = tasks.filter((task) => task.status === "succeeded").length;
   const failedCount = tasks.filter((task) =>
@@ -24,7 +27,7 @@ export function DetailPanel({
   });
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-4">
+    <div className="flex min-h-0 flex-col gap-4">
       <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
@@ -32,7 +35,7 @@ export function DetailPanel({
             <CardTitle>辅助详情</CardTitle>
           </div>
           <CardDescription>
-            右侧只保留会话概览和最近任务，主任务进展已经并入聊天时间线。
+            下方展示会话概览与最近任务，主任务进展已改为聊天区单卡刷新。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4 text-sm">
@@ -42,7 +45,7 @@ export function DetailPanel({
               <Badge>聊天时间线</Badge>
             </div>
             <p className="mt-3 text-foreground">
-              用户消息、任务状态、失败原因和结果素材都以时间顺序回流到中间聊天区。
+              用户消息与单条任务卡按时间排序，任务状态、失败原因和结果素材直接在卡片内更新。
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -88,7 +91,7 @@ export function DetailPanel({
             </div>
           ) : null}
           {orderedTasks.map((task) => (
-            <TaskCard key={task.id} task={task} compact />
+            <TaskCard key={task.id} task={task} compact actions={renderTaskActions?.(task)} />
           ))}
         </div>
       </div>

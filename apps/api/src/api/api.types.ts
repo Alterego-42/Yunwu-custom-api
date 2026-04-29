@@ -1,6 +1,7 @@
 import type {
   AssetRecord,
   CapabilityType,
+  ConversationMetadata,
   ModelRecord,
   ProviderAdminResponse,
   ProviderAlert,
@@ -19,6 +20,7 @@ import type {
 export type {
   AssetRecord,
   CapabilityType,
+  ConversationMetadata,
   ModelRecord,
   ProviderAdminResponse,
   ProviderAlert,
@@ -36,11 +38,23 @@ export type {
 export interface ConversationSummary {
   id: string;
   title: string;
+  metadata?: ConversationMetadata;
   updatedAt: string;
   createdAt: string;
 }
 
+export interface TaskFailureRecord {
+  category: string;
+  retryable: boolean;
+  title?: string;
+  detail?: string;
+  statusCode?: number;
+}
+
 export interface TaskRecord extends SharedTaskRecord {
+  params?: Record<string, unknown>;
+  failure?: TaskFailureRecord;
+  canRetry?: boolean;
   errorMessage?: string;
   progress?: number;
   conversationId?: string;
@@ -97,6 +111,31 @@ export interface TasksResponse {
 export interface RetryTaskResponse {
   task: TaskRecord;
   retriedFromTaskId: string;
+}
+
+export interface HistoryResponse {
+  items: TaskRecord[];
+}
+
+export interface LibraryItemRecord {
+  asset: AssetRecord;
+  task: TaskRecord;
+  conversation?: ConversationSummary;
+}
+
+export interface LibraryResponse {
+  items: LibraryItemRecord[];
+}
+
+export interface DeleteLibraryAssetResponse {
+  asset: AssetRecord;
+}
+
+export interface HomeResponse {
+  recentConversations: ConversationSummary[];
+  recentTasks: TaskRecord[];
+  recentAssets: LibraryItemRecord[];
+  recoveryTasks: TaskRecord[];
 }
 
 export interface TaskEventRecord {

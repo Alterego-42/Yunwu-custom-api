@@ -1,6 +1,6 @@
 {
   "name": "yunwu-custom-api",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "scripts": {
@@ -8,6 +8,14 @@
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "format": "pnpm -r format",
+    "local:prepare": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/start-local.ps1 -Mode Prepare",
+    "local:start": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/start-local.ps1 -Mode Windows",
+    "local:start:manual": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/start-local.ps1 -Mode Manual",
+    "local:stop": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/stop-local.ps1",
+    "local:test": "pnpm local:test:auth && pnpm local:test:routes",
+    "local:test:auth": "pnpm --filter @yunwu/api test:auth",
+    "local:test:routes": "pnpm --filter @yunwu/web test:routes",
+    "local:test:smoke": "node ./scripts/regression/local-smoke.mjs",
     "docker:infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d",
     "docker:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
     "docker:up": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build",

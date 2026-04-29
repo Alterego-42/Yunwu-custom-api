@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -11,7 +12,7 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { cn } from "@/lib/utils";
+import { getSourceActionLabel, resolveAssetUrl } from "@/lib/api-mappers";
 import type { UiTask } from "@/lib/api-types";
 
 const statusLabel: Record<UiTask["status"], string> = {
@@ -61,12 +62,13 @@ export function TaskAssetPreview({
 }: {
   asset: NonNullable<UiTask["resultAssets"]>[number];
 }) {
+  const assetUrl = resolveAssetUrl(asset.url);
   const content = (
     <>
       <div className="relative aspect-[4/3] overflow-hidden border-b border-white/10 bg-white/[0.03]">
-        {asset.url ? (
+        {assetUrl ? (
           <img
-            src={asset.url}
+            src={assetUrl}
             alt={asset.label}
             className="h-full w-full object-cover transition group-hover:scale-[1.02]"
           />
@@ -86,11 +88,10 @@ export function TaskAssetPreview({
     </>
   );
 
-  if (asset.url) {
+  if (assetUrl) {
     return (
       <a
-        href={asset.url}
-        target="_blank"
+        href={assetUrl}
         rel="noreferrer"
         className="group overflow-hidden rounded-xl border border-white/10 bg-black/20"
       >
@@ -105,9 +106,11 @@ export function TaskAssetPreview({
 export function TaskCard({
   task,
   compact = false,
+  actions,
 }: {
   task: UiTask;
   compact?: boolean;
+  actions?: ReactNode;
 }) {
   const isActive = task.status === "queued" || task.status === "submitted" || task.status === "running";
   const hasResults = Boolean(task.resultAssets?.length);
@@ -131,26 +134,6 @@ export function TaskCard({
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>进度</span>
-            <span>{task.progress}%</span>
-          </div>
-          <div className="h-2 rounded-full bg-white/10">
-            <div
-              className={cn(
-                "h-2 rounded-full transition-all",
-                task.status === "succeeded"
-                  ? "bg-emerald-400"
-                  : task.status === "failed" || task.status === "cancelled" || task.status === "expired"
-                    ? "bg-destructive"
-                    : "bg-primary",
-              )}
-              style={{ width: `${task.progress}%` }}
-            />
-          </div>
-        </div>
-
         {task.summary ? (
           <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-foreground">
             {task.summary}
@@ -163,12 +146,42 @@ export function TaskCard({
           </div>
         ) : null}
 
+        {task.failure ? (
+          <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-muted-foreground">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-medium text-foreground">
+                {task.failure.title ?? "失败恢复"}
+              </span>
+              <Badge variant="outline">{task.failure.category}</Badge>
+              <Badge
+                variant="outline"
+                className={
+                  task.failure.retryable
+                    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+                    : "border-white/10 bg-white/[0.06] text-muted-foreground"
+                }
+              >
+                {task.failure.retryable ? "可重试" : "需调整参数"}
+              </Badge>
+            </div>
+            {task.failure.detail ? <p className="mt-2">{task.failure.detail}</p> : null}
+          </div>
+        ) : null}
+
         <div className="flex flex-wrap gap-2">
           {task.tags.map((tag) => (
             <Badge key={tag} variant="outline">
               {tag}
             </Badge>
           ))}
+          {task.sourceAction ? (
+            <Badge variant="outline">{getSourceActionLabel(task.sourceAction)}</Badge>
+          ) : null}
+          {task.sourceTaskId ? (
+            <Badge variant="outline" className="max-w-full truncate">
+              来源 {task.sourceTaskId}
+            </Badge>
+          ) : null}
         </div>
 
         {!compact && hasResults ? (
@@ -188,12 +201,13 @@ export function TaskCard({
           <div className="space-y-2">
             <div className="text-xs font-medium text-muted-foreground">参考素材</div>
             <div className="flex flex-wrap gap-2">
-              {task.inputAssets?.map((asset) =>
-                asset.url ? (
+              {task.inputAssets?.map((asset) => {
+                const assetUrl = resolveAssetUrl(asset.url);
+
+                return assetUrl ? (
                   <a
                     key={asset.id}
-                    href={asset.url}
-                    target="_blank"
+                    href={assetUrl}
                     rel="noreferrer"
                     className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
                   >
@@ -208,8 +222,8 @@ export function TaskCard({
                     <ImageIcon className="h-3.5 w-3.5" />
                     <span>{asset.label}</span>
                   </div>
-                ),
-              )}
+                );
+              })}
             </div>
           </div>
         ) : null}
@@ -217,6 +231,8 @@ export function TaskCard({
         {compact && hasInputs ? (
           <div className="text-xs text-muted-foreground">参考素材 {task.inputAssets?.length} 项</div>
         ) : null}
+
+        {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
 
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           {isActive ? (

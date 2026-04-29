@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
   OnModuleInit,
@@ -29,6 +30,11 @@ import type {
   ConversationTaskEventsResponse,
   ConversationsResponse,
   CreateTaskResponse,
+  DeleteLibraryAssetResponse,
+  HistoryResponse,
+  HomeResponse,
+  LibraryItemRecord,
+  LibraryResponse,
   ModelRecord,
   ModelsResponse,
   ProviderAdminResponse,
@@ -44,6 +50,7 @@ import type {
   RetryTaskResponse,
   TaskEventRecord,
   TaskEventsResponse,
+  TaskFailureRecord,
   TaskMessage,
   TaskRecord,
   TasksResponse,
@@ -72,6 +79,7 @@ import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
 
 export const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible";
 type SupportedTaskCapability = "image.generate" | "image.edit";
+type SupportedTaskSourceAction = "retry" | "edit" | "variant" | "fork";
 const SUPPORTED_TASK_CAPABILITIES: SupportedTaskCapability[] = [
   "image.generate",
   "image.edit",
@@ -115,6 +123,12 @@ interface TaskInputShape {
   assetIds?: string[];
   params?: Record<string, unknown>;
 }
+
+type TaskRecordEntity = Task & {
+  conversation?: Conversation | null;
+  user?: User | null;
+  events?: TaskEvent[];
+};
 
 @Injectable()
 export class ApiService implements OnModuleInit {
@@ -225,13 +239,6 @@ export class ApiService implements OnModuleInit {
       );
     }
 
-    const conversation = await this.prisma.conversation.findFirst({
-      where: { id: input.conversationId, userId: user.id, status: "active" },
-    });
-    if (!conversation) {
-      throw new NotFoundException("Conversation not found.");
-    }
-
     const model = await this.findEnabledModel(input.model, capability);
     if (!model) {
       throw new BadRequestException(
@@ -239,22 +246,59 @@ export class ApiService implements OnModuleInit {
       );
     }
 
-    const inputAssetIds = [...new Set(input.assetIds ?? [])];
-    const inputAssets =
-      inputAssetIds.length > 0
-        ? await this.prisma.asset.findMany({
-            where: {
-              id: { in: inputAssetIds },
-              userId: user.id,
-              status: "ready",
-              type: "upload",
-            },
-          })
-        : [];
-    if (inputAssets.length !== inputAssetIds.length) {
+    if (input.sourceAction && !input.sourceTaskId) {
+      throw new BadRequestException(
+        "sourceTaskId is required when sourceAction is provided.",
+      );
+    }
+
+    const shouldFork = Boolean(input.fork || input.sourceAction === "fork");
+    const sourceTask = input.sourceTaskId
+      ? await this.prisma.task.findFirst({
+          where:
+            user.role === "admin"
+              ? { id: input.sourceTaskId }
+              : { id: input.sourceTaskId, userId: user.id },
+          include: { conversation: true, assets: true, events: true },
+        })
+      : null;
+    if (input.sourceTaskId && !sourceTask) {
+      throw new NotFoundException("Source task not found.");
+    }
+    if (shouldFork && !sourceTask) {
+      throw new BadRequestException("Fork requires a valid sourceTaskId.");
+    }
+    if (
+      sourceTask?.conversationId &&
+      input.conversationId &&
+      !shouldFork &&
+      sourceTask.conversationId !== input.conversationId
+    ) {
+      throw new BadRequestException(
+        "Source task must continue in its original conversation unless fork is enabled.",
+      );
+    }
+
+    const normalizedSourceAction: SupportedTaskSourceAction | undefined =
+      shouldFork
+        ? "fork"
+        : this.asSupportedSourceAction(input.sourceAction);
+    const requestedAssetIds = this.normalizeAssetIds(
+      input.assetIds?.length
+        ? input.assetIds
+        : this.defaultSourceAssetIds(sourceTask, normalizedSourceAction),
+    );
+    const inputAssets = await this.loadInputAssets(user.id, requestedAssetIds);
+    if (inputAssets.length !== requestedAssetIds.length) {
       throw new BadRequestException("One or more assetIds are invalid.");
     }
 
+    const conversation = await this.resolveTaskConversation(user, {
+      conversationId: input.conversationId,
+      prompt: input.prompt,
+      shouldFork,
+      sourceTask,
+    });
     const { task } = await this.prisma.$transaction(async (tx) => {
       const userMessage = await tx.message.create({
         data: {
@@ -263,8 +307,10 @@ export class ApiService implements OnModuleInit {
           role: "user",
           content: input.prompt,
           metadata: {
-            type: inputAssetIds.length > 0 ? "upload_card" : "text",
-            assetIds: inputAssetIds,
+            type: requestedAssetIds.length > 0 ? "upload_card" : "text",
+            assetIds: requestedAssetIds,
+            sourceTaskId: sourceTask?.id,
+            sourceAction: normalizedSourceAction,
           },
         },
       });
@@ -273,13 +319,15 @@ export class ApiService implements OnModuleInit {
         data: {
           userId: user.id,
           conversationId: conversation.id,
+          sourceTaskId: sourceTask?.id,
+          sourceAction: normalizedSourceAction,
           type: capability,
           status: "queued",
           progress: 0,
           input: {
             model: input.model,
             prompt: input.prompt,
-            assetIds: inputAssetIds,
+            assetIds: requestedAssetIds,
             params: this.toJsonRecord(input.params),
           } satisfies Prisma.InputJsonObject,
         },
@@ -298,17 +346,26 @@ export class ApiService implements OnModuleInit {
             ...this.buildInputSummary({
               model: input.model,
               prompt: input.prompt,
-              assetIds: inputAssetIds,
+              assetIds: requestedAssetIds,
               params: this.toJsonRecord(input.params),
             }),
+            ...(sourceTask?.id ? { sourceTaskId: sourceTask.id } : {}),
+            ...(normalizedSourceAction
+              ? { sourceAction: normalizedSourceAction }
+              : {}),
           } as Prisma.InputJsonObject,
         },
       });
 
-      if (inputAssetIds.length > 0) {
+      if (requestedAssetIds.length > 0) {
         await tx.asset.updateMany({
-          where: { id: { in: inputAssetIds }, userId: user.id },
-          data: { messageId: userMessage.id, taskId: task.id },
+          where: {
+            id: { in: requestedAssetIds },
+            userId: user.id,
+            type: "upload",
+            messageId: null,
+          },
+          data: { messageId: userMessage.id },
         });
       }
 
@@ -317,7 +374,12 @@ export class ApiService implements OnModuleInit {
 
     const updatedTask = await this.prisma.task.findUniqueOrThrow({
       where: { id: task.id },
-      include: { assets: true },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
     });
     const conversationDetail = await this.getConversationDetail(
       user,
@@ -337,10 +399,166 @@ export class ApiService implements OnModuleInit {
     };
   }
 
+  async getHome(user: AuthenticatedUser): Promise<HomeResponse> {
+    const [conversations, recentTasks, recentAssets, recoveryTasks] =
+      await Promise.all([
+        this.prisma.conversation.findMany({
+          where: { userId: user.id, status: "active" },
+          orderBy: { updatedAt: "desc" },
+          take: 6,
+        }),
+        this.prisma.task.findMany({
+          where: { userId: user.id },
+          orderBy: { updatedAt: "desc" },
+          include: {
+            assets: true,
+            conversation: true,
+            user: true,
+            events: this.latestFailedEventArgs(),
+          },
+          take: 8,
+        }),
+        this.prisma.asset.findMany({
+          where: {
+            userId: user.id,
+            type: "generated",
+            status: { not: "deleted" },
+            task: {
+              is: {
+                userId: user.id,
+                status: "succeeded",
+              },
+            },
+          },
+          include: {
+            task: {
+              include: {
+                assets: true,
+                conversation: true,
+                user: true,
+                events: this.latestFailedEventArgs(),
+              },
+            },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 8,
+        }),
+        this.prisma.task.findMany({
+          where: { userId: user.id, status: "failed" },
+          orderBy: { updatedAt: "desc" },
+          include: {
+            assets: true,
+            conversation: true,
+            user: true,
+            events: this.latestFailedEventArgs(),
+          },
+          take: 8,
+        }),
+      ]);
+
+    return {
+      recentConversations: conversations.map((conversation) =>
+        this.toConversationSummary(conversation),
+      ),
+      recentTasks: recentTasks.map((task) => this.toTaskRecord(task, task.assets)),
+      recentAssets: recentAssets
+        .map((asset) => this.toLibraryItemRecord(asset))
+        .filter((item): item is LibraryItemRecord => Boolean(item)),
+      recoveryTasks: recoveryTasks
+        .map((task) => this.toTaskRecord(task, task.assets))
+        .filter((task) => Boolean(task.failure)),
+    };
+  }
+
+  async getHistory(user: AuthenticatedUser): Promise<HistoryResponse> {
+    const tasks = await this.prisma.task.findMany({
+      where: { userId: user.id },
+      orderBy: { updatedAt: "desc" },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
+      take: 50,
+    });
+
+    return {
+      items: tasks.map((task) => this.toTaskRecord(task, task.assets)),
+    };
+  }
+
+  async getLibrary(user: AuthenticatedUser): Promise<LibraryResponse> {
+    const assets = await this.prisma.asset.findMany({
+      where: {
+        userId: user.id,
+        type: "generated",
+        status: { not: "deleted" },
+        task: {
+          is: {
+            userId: user.id,
+            status: "succeeded",
+          },
+        },
+      },
+      include: {
+        task: {
+          include: {
+            assets: true,
+            conversation: true,
+            user: true,
+            events: this.latestFailedEventArgs(),
+          },
+        },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+    });
+
+    return {
+      items: assets
+        .map((asset) => this.toLibraryItemRecord(asset))
+        .filter((item): item is LibraryItemRecord => Boolean(item)),
+    };
+  }
+
+  async deleteLibraryAsset(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<DeleteLibraryAssetResponse> {
+    const existing = await this.prisma.asset.findFirst({
+      where: { id, userId: user.id, type: "generated" },
+    });
+    if (!existing) {
+      throw new NotFoundException("Library asset not found.");
+    }
+
+    const asset =
+      existing.status === "deleted"
+        ? existing
+        : await this.prisma.asset.update({
+            where: { id: existing.id },
+            data: {
+              status: "deleted",
+              metadata: {
+                ...this.asRecord(existing.metadata),
+                deletedAt: new Date().toISOString(),
+              } as Prisma.InputJsonObject,
+            },
+          });
+
+    return { asset: this.toAssetRecord(asset) };
+  }
+
   async getTask(user: AuthenticatedUser, id: string): Promise<TaskResponse> {
     const task = await this.prisma.task.findFirst({
       where: user.role === "admin" ? { id } : { id, userId: user.id },
-      include: { assets: true, conversation: true, user: true },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
     });
     if (!task) {
       throw new NotFoundException("Task not found.");
@@ -353,7 +571,12 @@ export class ApiService implements OnModuleInit {
     const tasks = await this.prisma.task.findMany({
       where: user.role === "admin" ? undefined : { userId: user.id },
       orderBy: { updatedAt: "desc" },
-      include: { assets: true, conversation: true, user: true },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
       take: 50,
     });
 
@@ -375,10 +598,18 @@ export class ApiService implements OnModuleInit {
     return { events: events.map((event) => this.toTaskEventRecord(event)) };
   }
 
-  async retryFailedTask(id: string): Promise<RetryTaskResponse> {
-    const task = await this.prisma.task.findUnique({
-      where: { id },
-      include: { assets: true, conversation: true, user: true },
+  async retryFailedTask(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<RetryTaskResponse> {
+    const task = await this.prisma.task.findFirst({
+      where: user.role === "admin" ? { id } : { id, userId: user.id },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
     });
     if (!task) {
       throw new NotFoundException("Task not found.");
@@ -393,6 +624,12 @@ export class ApiService implements OnModuleInit {
         "Task cannot be retried because user or conversation context is missing.",
       );
     }
+    const failure = this.toTaskFailureRecord(task);
+    if (!failure?.retryable) {
+      throw new BadRequestException(
+        "Only retryable failed tasks can be retried from the client.",
+      );
+    }
 
     const previousError = this.sanitizeDisplayText(
       task.errorMessage ?? "",
@@ -403,6 +640,8 @@ export class ApiService implements OnModuleInit {
         data: {
           userId: task.userId,
           conversationId: task.conversationId,
+          sourceTaskId: task.id,
+          sourceAction: "retry",
           type: task.type,
           status: "queued",
           progress: 0,
@@ -461,7 +700,7 @@ export class ApiService implements OnModuleInit {
 
       return created;
     });
-    await this.taskQueue.enqueueTask(retryTask.id, "admin-retry");
+    await this.taskQueue.enqueueTask(retryTask.id, "user-retry");
     this.conversationEvents.publishTaskUpdated({
       conversationId: task.conversationId,
       taskId: retryTask.id,
@@ -470,7 +709,12 @@ export class ApiService implements OnModuleInit {
 
     const hydrated = await this.prisma.task.findUniqueOrThrow({
       where: { id: retryTask.id },
-      include: { assets: true, conversation: true, user: true },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+      },
     });
 
     return {
@@ -1041,7 +1285,13 @@ export class ApiService implements OnModuleInit {
       where: user.role === "admin" ? { id } : { id, userId: user.id },
       include: {
         messages: { include: { assets: true }, orderBy: { createdAt: "asc" } },
-        tasks: { include: { assets: true }, orderBy: { createdAt: "asc" } },
+        tasks: {
+          include: {
+            assets: true,
+            events: this.latestFailedEventArgs(),
+          },
+          orderBy: { createdAt: "asc" },
+        },
       },
     });
     if (!conversation) {
@@ -1052,9 +1302,23 @@ export class ApiService implements OnModuleInit {
     const messageAssets = conversation.messages.flatMap(
       (message) => message.assets,
     );
+    const referencedInputAssetIds = this.normalizeAssetIds(
+      conversation.tasks.flatMap((task) =>
+        this.asStringArray(this.asRecord(task.input).assetIds) ?? [],
+      ),
+    );
     const assetsById = new Map(
       [...taskAssets, ...messageAssets].map((asset) => [asset.id, asset]),
     );
+    const missingInputAssetIds = referencedInputAssetIds.filter(
+      (assetId) => !assetsById.has(assetId),
+    );
+    if (missingInputAssetIds.length > 0) {
+      const referencedAssets = await this.prisma.asset.findMany({
+        where: { id: { in: missingInputAssetIds } },
+      });
+      referencedAssets.forEach((asset) => assetsById.set(asset.id, asset));
+    }
 
     return {
       ...this.toConversationSummary(conversation),
@@ -1073,9 +1337,15 @@ export class ApiService implements OnModuleInit {
   private toConversationSummary(
     conversation: Conversation,
   ): ConversationSummary {
+    const metadata = this.asRecord(conversation.metadata);
+
     return {
       id: conversation.id,
       title: conversation.title ?? "Untitled conversation",
+      metadata:
+        Object.keys(metadata).length > 0
+          ? (metadata as ConversationSummary["metadata"])
+          : undefined,
       createdAt: conversation.createdAt.toISOString(),
       updatedAt: conversation.updatedAt.toISOString(),
     };
@@ -1097,15 +1367,16 @@ export class ApiService implements OnModuleInit {
   }
 
   private toTaskRecord(
-    task: Task & { conversation?: Conversation | null; user?: User | null },
+    task: TaskRecordEntity,
     assets: Asset[] = [],
   ): TaskRecord {
     const input = this.asRecord(task.input) as TaskInputShape;
     const output = this.asRecord(task.output);
-    const assetIds = assets.map((asset) => asset.id);
+    const inputAssetIds = this.asStringArray(input.assetIds) ?? [];
     const outputAssetIds = Array.isArray(output.assetIds)
       ? output.assetIds.filter((id): id is string => typeof id === "string")
       : [];
+    const failure = this.toTaskFailureRecord(task);
 
     return {
       id: task.id,
@@ -1115,6 +1386,11 @@ export class ApiService implements OnModuleInit {
       status: task.status,
       modelId: input.model ?? "gpt-image-1",
       prompt: input.prompt ?? "",
+      params: this.asRecord(input.params),
+      sourceTaskId: task.sourceTaskId ?? undefined,
+      sourceAction: task.sourceAction ?? undefined,
+      failure: failure ?? undefined,
+      canRetry: Boolean(task.status === "failed" && failure?.retryable),
       progress: task.progress,
       conversationId: task.conversationId ?? undefined,
       conversationTitle: task.conversation?.title ?? undefined,
@@ -1126,7 +1402,7 @@ export class ApiService implements OnModuleInit {
       createdAt: task.createdAt.toISOString(),
       updatedAt: task.updatedAt.toISOString(),
       errorMessage: task.errorMessage ?? undefined,
-      assetIds: assetIds.length > 0 ? assetIds : outputAssetIds,
+      assetIds: inputAssetIds.length > 0 ? inputAssetIds : outputAssetIds,
     };
   }
 
@@ -1234,6 +1510,29 @@ export class ApiService implements OnModuleInit {
     };
   }
 
+  private toLibraryItemRecord(
+    asset: Asset & {
+      task?:
+        | (TaskRecordEntity & {
+            assets: Asset[];
+            conversation?: Conversation | null;
+          })
+        | null;
+    },
+  ): LibraryItemRecord | null {
+    if (!asset.task) {
+      return null;
+    }
+
+    return {
+      asset: this.toAssetRecord(asset),
+      task: this.toTaskRecord(asset.task, asset.task.assets ?? []),
+      conversation: asset.task.conversation
+        ? this.toConversationSummary(asset.task.conversation)
+        : undefined,
+    };
+  }
+
   private toAdminModelCapabilityRecord(
     row: ModelCapability,
   ): AdminModelCapabilityRecord {
@@ -1309,6 +1608,150 @@ export class ApiService implements OnModuleInit {
             typeof metadata.height === "number" ? metadata.height : undefined,
         };
       }),
+    };
+  }
+
+  private latestFailedEventArgs() {
+    return {
+      where: { eventType: "failed" },
+      orderBy: { createdAt: "desc" as const },
+      take: 1,
+    };
+  }
+
+  private normalizeAssetIds(assetIds?: string[]) {
+    return [...new Set((assetIds ?? []).filter((assetId) => Boolean(assetId)))];
+  }
+
+  private async loadInputAssets(userId: string, assetIds: string[]) {
+    if (assetIds.length === 0) {
+      return [];
+    }
+
+    const assets = await this.prisma.asset.findMany({
+      where: {
+        id: { in: assetIds },
+        userId,
+        type: { in: ["upload", "generated"] },
+        status: { in: ["ready", "deleted"] },
+      },
+    });
+    const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+
+    return assetIds
+      .map((assetId) => assetsById.get(assetId))
+      .filter((asset): asset is Asset => Boolean(asset));
+  }
+
+  private defaultSourceAssetIds(
+    sourceTask: (TaskRecordEntity & { assets?: Asset[] }) | null,
+    sourceAction?: SupportedTaskSourceAction,
+  ) {
+    if (
+      !sourceTask ||
+      (sourceAction !== "edit" &&
+        sourceAction !== "variant" &&
+        sourceAction !== "fork")
+    ) {
+      return [];
+    }
+
+    return sourceTask.assets
+      ?.filter((asset) => asset.type === "generated")
+      .map((asset) => asset.id) ?? [];
+  }
+
+  private async resolveTaskConversation(
+    user: AuthenticatedUser,
+    input: {
+      conversationId?: string;
+      prompt: string;
+      shouldFork: boolean;
+      sourceTask: (TaskRecordEntity & { conversation?: Conversation | null }) | null;
+    },
+  ) {
+    if (input.shouldFork) {
+      return this.prisma.conversation.create({
+        data: {
+          userId: user.id,
+          title: this.buildConversationTitle(
+            input.prompt,
+            input.sourceTask?.conversation?.title,
+          ),
+          metadata: this.buildForkConversationMetadata(input.sourceTask),
+        },
+      });
+    }
+
+    if (input.conversationId) {
+      const conversation = await this.prisma.conversation.findFirst({
+        where: { id: input.conversationId, userId: user.id, status: "active" },
+      });
+      if (!conversation) {
+        throw new NotFoundException("Conversation not found.");
+      }
+
+      return conversation;
+    }
+
+    return this.prisma.conversation.create({
+      data: {
+        userId: user.id,
+        title: this.buildConversationTitle(input.prompt),
+      },
+    });
+  }
+
+  private buildConversationTitle(prompt: string, fallbackTitle?: string | null) {
+    const normalizedPrompt = prompt.trim();
+    if (fallbackTitle?.trim()) {
+      return fallbackTitle.trim();
+    }
+
+    return normalizedPrompt
+      ? this.truncateText(normalizedPrompt, 80)
+      : "New conversation";
+  }
+
+  private buildForkConversationMetadata(
+    sourceTask: (TaskRecordEntity & { conversation?: Conversation | null }) | null,
+  ): Prisma.InputJsonObject {
+    return {
+      ...(sourceTask?.conversationId
+        ? { forkedFromConversationId: sourceTask.conversationId }
+        : {}),
+      ...(sourceTask?.id ? { forkedFromTaskId: sourceTask.id } : {}),
+    };
+  }
+
+  private asSupportedSourceAction(
+    value: unknown,
+  ): SupportedTaskSourceAction | undefined {
+    return ["retry", "edit", "variant", "fork"].includes(String(value))
+      ? (value as SupportedTaskSourceAction)
+      : undefined;
+  }
+
+  private toTaskFailureRecord(task: TaskRecordEntity): TaskFailureRecord | null {
+    const details = this.asRecord(task.events?.[0]?.details);
+    if (Object.keys(details).length === 0 && !task.errorMessage) {
+      return null;
+    }
+
+    const category = this.asOptionalString(details.category) ?? "unknown";
+    const retryable = Boolean(details.retryable ?? category === "unknown");
+    const title =
+      this.asOptionalString(details.title) ??
+      (task.status === "failed" ? "Image task failed" : undefined);
+    const detail = this.asOptionalString(details.detail);
+    const statusCode = this.asNumber(details.statusCode);
+
+    return {
+      category,
+      retryable,
+      ...(title ? { title } : {}),
+      ...(detail ? { detail } : {}),
+      ...(statusCode !== undefined ? { statusCode } : {}),
     };
   }
 

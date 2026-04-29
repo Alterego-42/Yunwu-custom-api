@@ -1,9 +1,15 @@
 import { FormEvent, useMemo, useState } from "react";
-import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import { LoaderCircle, LockKeyhole, Sparkles } from "lucide-react";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { ArrowRight, LoaderCircle, LockKeyhole, Sparkles } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/lib/auth";
 
@@ -11,19 +17,35 @@ function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "登录失败，请稍后重试。";
 }
 
+function resolveRedirectTarget(
+  state: unknown,
+  fallbackPath: string,
+  disallowedPaths: string[] = ["/login", "/register"],
+) {
+  const from = (
+    state as {
+      from?: { pathname?: string; search?: string; hash?: string };
+    } | null
+  )?.from;
+  if (!from?.pathname || disallowedPaths.includes(from.pathname)) {
+    return fallbackPath;
+  }
+
+  return `${from.pathname}${from.search ?? ""}${from.hash ?? ""}`;
+}
+
 export function LoginPage() {
   const location = useLocation();
   const navigate = useNavigate();
-  const { isAuthenticated, isLoading, login } = useAuth();
+  const { defaultRoute, isAuthenticated, isLoading, login, user } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const redirectTo = useMemo(() => {
-    const state = location.state as { from?: { pathname?: string } } | null;
-    return state?.from?.pathname && state.from.pathname !== "/login" ? state.from.pathname : "/";
-  }, [location.state]);
+    return resolveRedirectTarget(location.state, defaultRoute);
+  }, [defaultRoute, location.state]);
 
   if (!isLoading && isAuthenticated) {
     return <Navigate to={redirectTo} replace />;
@@ -35,8 +57,11 @@ export function LoginPage() {
     setError(null);
 
     try {
-      await login({ email: email.trim(), password });
-      navigate(redirectTo, { replace: true });
+      const nextUser = await login({ email: email.trim(), password });
+      const nextDefaultRoute = nextUser.role === "admin" ? "/admin" : "/";
+      navigate(resolveRedirectTarget(location.state, nextDefaultRoute), {
+        replace: true,
+      });
     } catch (requestError) {
       setError(getErrorMessage(requestError));
     } finally {
@@ -58,7 +83,9 @@ export function LoginPage() {
               </div>
               <div>
                 <CardTitle>登录 Yunwu</CardTitle>
-                <CardDescription>登录后进入工作台；管理页仅管理员可见。</CardDescription>
+                <CardDescription>
+                  登录后进入工作台；管理页仅管理员可见。
+                </CardDescription>
               </div>
             </div>
           </CardHeader>
@@ -95,17 +122,44 @@ export function LoginPage() {
                 />
               </div>
 
+              <div className="flex items-center justify-between text-sm text-muted-foreground">
+                <span>个人用户请使用注册入口创建账号。</span>
+                <Link
+                  to="/register"
+                  state={location.state}
+                  className="inline-flex items-center gap-1 text-primary transition hover:text-primary/80"
+                >
+                  去注册
+                  <ArrowRight className="h-4 w-4" />
+                </Link>
+              </div>
+
               {error ? (
                 <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   {error}
                 </div>
               ) : null}
 
-              <Button className="w-full" type="submit" disabled={submitting || isLoading}>
-                {submitting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LockKeyhole className="h-4 w-4" />}
+              <Button
+                className="w-full"
+                type="submit"
+                disabled={submitting || isLoading}
+              >
+                {submitting ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin" />
+                ) : (
+                  <LockKeyhole className="h-4 w-4" />
+                )}
                 登录
               </Button>
             </form>
+
+            {!isLoading && isAuthenticated && user ? null : (
+              <p className="mt-4 text-center text-xs text-muted-foreground">
+                admin/demo/member 共用统一登录口，管理员登录后会自动进入
+                `/admin`。
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>

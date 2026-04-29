@@ -1,24 +1,198 @@
 # Yunwu Custom API
 
-## Docker MVP（API + Worker + Web + Postgres + Redis + MinIO）
+面向个人用户的 AI 图片生成 + 编辑工作台。当前代码库已完成 round-2 的前台主链路，`Phase 3` 可以在 Windows 本地直接拉起并做最小回归验证。
 
-新增了基于 `Dockerfile` + `infra/docker-compose.app.yml` 的部署 overlay，不会覆盖现有仅基础设施的 `infra/docker-compose.yml`。
+## 当前状态
 
-### 本地开发
+已完成并可本地验证的能力：
+
+- 个人用户注册 / 登录 / 登录态恢复 / 路由回跳
+- 首页 `/`、创建页 `/create`、工作台 `/workspace/:conversationId`
+- 历史页 `/history`、作品库 `/library`
+- 管理页 `/admin` 与普通用户前台壳层分离
+- API + Worker 异步任务链路、SSE / 轮询状态刷新
+- 文生图、来源任务再编辑、上传图编辑、变体、Fork、失败恢复
+- 本地对象存储 / MinIO、PostgreSQL、Redis、最小烟测脚本
+
+当前推荐版本号：`v0.3.0`
+
+- 仍处于 `0.x` 阶段，说明产品还在快速迭代，不承诺稳定 API
+- 相比 `0.1.0`，现在已经不是只有底层链路，而是具备个人用户可跑通的前台创作闭环
+
+## 仓库结构
+
+- `apps/api`：NestJS API、鉴权、任务入队、SSE、Prisma
+- `apps/api` Worker 入口：BullMQ 消费、上游调用、结果落库 / 入存储
+- `apps/web`：Vite + React 前台工作台与管理页
+- `packages/shared`：共享类型与常量
+- `infra`：PostgreSQL、Redis、MinIO、本地 Docker Compose
+- `scripts/dev`：Windows 本地启动 / 停止脚本
+
+## 推荐本地启动
+
+### 前置条件
+
+- Windows PowerShell 5.1+ 或 PowerShell 7+
+- Node.js 22+
+- Corepack
+- `pnpm@10.17.1`
+- Docker Desktop
+
+首次准备：
 
 ```powershell
+corepack enable
+corepack prepare pnpm@10.17.1 --activate
 pnpm install
 Copy-Item .env.example .env
-docker compose --env-file .env -f infra/docker-compose.yml up -d
-pnpm --filter @yunwu/api prisma:migrate
+```
+
+### 一键启动
+
+默认推荐：
+
+```powershell
+pnpm local:start
+```
+
+这个命令会自动完成：
+
+1. 若缺少 `.env`，从 `.env.example` 复制
+2. 若缺少 `node_modules`，执行 `pnpm install`
+3. 启动 Postgres / Redis / MinIO
+4. 执行 Prisma generate + migrate deploy
+5. 打开 3 个新的 PowerShell 窗口：
+   - API：`pnpm --filter @yunwu/api dev:api`
+   - Worker：`pnpm --filter @yunwu/api dev:worker`
+   - Web：`pnpm --filter @yunwu/web dev`
+
+### 其他本地脚本
+
+- `pnpm local:start:manual`
+  - 只准备环境并打印手动启动命令
+- `pnpm local:prepare`
+  - 只做 infra + migration 预热，不自动启动 API / Worker / Web
+- `pnpm local:stop`
+  - 关闭 `local:start` 拉起的窗口，并停止基础设施
+
+### 本地访问地址
+
+- Web：首页 `http://127.0.0.1:5173`
+- 管理页 `http://127.0.0.1:5173/admin`
+- API `http://127.0.0.1:3000`
+- Health `http://127.0.0.1:3000/health`
+- Readiness `http://127.0.0.1:3000/readiness`
+- MinIO Console `http://127.0.0.1:9001`
+
+建议优先使用 `127.0.0.1`，不要混用 `localhost` 与 `127.0.0.1`。
+
+## 核心体验路径
+
+### 个人用户主链路
+
+1. 打开 `/register` 注册普通用户
+2. 登录后进入首页 `/`
+3. 从 `/create` 发起首个文生图或上传图编辑任务
+4. 提交后进入 `/workspace/:conversationId` 查看任务时间线、状态刷新与结果
+5. 从工作台继续再编辑、生成变体，或 Fork 到新会话
+6. 在 `/history` 查看任务链与恢复入口
+7. 在 `/library` 查看成功作品、继续创作、软删除作品
+
+### 管理员主链路
+
+1. 使用管理员账号登录
+2. 默认进入 `/admin`
+3. 查看 provider、模型能力、任务状态与可用性信息
+
+## 关键页面与能力
+
+| 页面 | 路径 | 当前能力 |
+| --- | --- | --- |
+| 登录页 | `/login` | 登录、恢复原目标页、区分普通用户 / 管理员默认落点 |
+| 注册页 | `/register` | 个人用户自注册并直接进入前台 |
+| 首页 | `/` | 最近会话、最近任务、最近作品、失败恢复入口 |
+| 创建页 | `/create` | 文生图、上传图编辑、来源任务预填、提交后进入工作台 |
+| 工作台 | `/workspace/:conversationId` | 会话时间线、上传图、继续创作、再编辑、变体、Fork、SSE / 轮询刷新 |
+| 历史页 | `/history` | 按任务追溯来源链、重试、继续创作、Fork |
+| 作品库 | `/library` | 成功作品查看、继续创作、Fork、软删除 |
+| 管理页 | `/admin` | 模型能力、provider 健康、后台入口，与前台壳层分离 |
+
+当前 round-2 重点能力：
+
+- 文生图：无上传图时正常走 `image.generate`
+- 上传图编辑：有上传图时优先按 `image.edit` 提交，不再悄悄退化成文生图
+- 来源任务继续创作：支持再编辑、变体、Fork
+- 失败恢复：系统类失败走重试，内容类失败走参数回填
+- 资产沉淀：成功结果进入作品库，支持从作品继续创作
+
+## 最小测试方式
+
+### 自动化最小回归
+
+本地环境启动后执行：
+
+```powershell
+pnpm local:test
+pnpm local:test:smoke
+```
+
+包含内容：
+
+- `pnpm local:test:auth`
+  - 后端鉴权关键测试
+- `pnpm local:test:routes`
+  - 前端登录 / 注册 / 路由壳层 / 权限跳转测试
+- `pnpm local:test:smoke`
+  - health、登录、`auth/me`、provider 检查、创建会话、创建任务、轮询结果
+
+### 手工最小验收
+
+推荐按这个顺序走一遍：
+
+1. `pnpm local:start`
+2. 浏览器打开 `http://127.0.0.1:5173/register`
+3. 注册普通用户并确认进入首页
+4. 退出后直接访问 `/history`，确认会被带到 `/login`，登录后自动回跳
+5. 打开 `/create` 提交一条文生图任务
+6. 再测试一次上传图片后发起编辑任务
+7. 打开 `/workspace/:conversationId`，确认时间线与任务状态刷新
+8. 点一遍 `/history` 与 `/library`
+9. 如需后台验证，再用管理员登录测试 `/admin`
+
+## 默认账号
+
+内建账号默认来自 `.env.example`：
+
+- Admin
+  - 邮箱：`admin@yunwu.local`
+  - 密码：`admin123456`
+- Demo
+  - 邮箱：`demo@yunwu.local`
+  - 密码：`demo123456`
+
+普通用户可直接通过 Web 注册。
+
+## 手动开发启动
+
+如果你不使用一键脚本，请按顺序执行：
+
+```powershell
+pnpm docker:infra:up
+pnpm --filter @yunwu/api prisma:generate
+pnpm --filter @yunwu/api prisma:migrate:deploy
+```
+
+然后在 3 个终端分别启动：
+
+```powershell
 pnpm --filter @yunwu/api dev:api
 pnpm --filter @yunwu/api dev:worker
 pnpm --filter @yunwu/web dev
 ```
 
-### Docker 推荐启动路径
+## Docker 推荐路径
 
-推荐默认路径：直接起完整栈；只有在你想单独检查基础设施时，才先起 infra。
+如果你想直接启动完整栈：
 
 ```powershell
 pnpm docker:up
@@ -27,16 +201,12 @@ pnpm docker:logs
 pnpm docker:down
 ```
 
-### Docker 代理（Windows / Docker Desktop）
+如只想先拉起基础依赖：
 
-如果 Docker Hub 拉取失败，而宿主机已可通过本地代理出网，可先让 Docker Desktop 复用宿主机系统代理；本机本轮验证通过的代理入口是 `127.0.0.1:7897`。
-
-- 启用前提：Windows 系统代理已指向 `127.0.0.1:7897`，且本地代理程序正在监听
-- 验证方式：执行 `docker info`，确认存在 `HTTP Proxy` / `HTTPS Proxy`；再执行 `docker pull node:22-bookworm-slim` 或 `docker pull nginx:1.27-alpine`
-- 项目启动：代理打通后按默认流程执行 `pnpm docker:up`
-- 恢复方式：关闭 Windows 系统代理，或在 Docker Desktop 的 `Settings > Resources > Proxies` 中恢复为默认/关闭手动代理，然后重启 Docker Desktop
-
-说明：本仓库不额外写入 Docker Desktop 私有配置文件，优先复用宿主机现有代理设置，避免引入不可见的本机状态漂移。
+```powershell
+pnpm docker:infra:up
+pnpm docker:infra:down
+```
 
 等价命令：
 
@@ -47,193 +217,15 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml down
 ```
 
-如只想先拉起基础依赖：
+## 运行前提
 
-```powershell
-pnpm docker:infra:up
-pnpm docker:infra:down
-```
-
-默认入口：
-
-- Web：`http://localhost:5173`
-- 管理页：`http://localhost:5173/admin`
-- API：`http://localhost:3000`
-- API liveness：`http://localhost:3000/health`
-- API readiness：`http://localhost:3000/readiness`
-- MinIO Console：`http://localhost:9001`
-
-### readiness / health
-
-- `/health` 只做轻量存活返回，不访问外部依赖。
-- `/readiness` 检查 PostgreSQL、Redis，以及启用对象存储时的 MinIO live probe。
-- Worker 不额外暴露 HTTP 端口，使用容器 `healthcheck` 执行 `apps/api/dist/health/worker-readiness.js` 检查 PostgreSQL、Redis 和已配置的对象存储。
-
-### 环境变量与 Docker 要点
-
-- 本地开发沿用 `.env`，不要提交真实密钥；仅保留 `.env.example`。
-- Docker overlay 会把 API / Worker 的 `DATABASE_URL`、`REDIS_URL`、`MINIO_*` 指向 compose 内网服务名。
-- 单 provider 约束保持不变：只使用一组 `YUNWU_BASE_URL` + `YUNWU_API_KEY`，不要在 compose 或文档里扩展多 provider 配置。
-- Web 容器在构建时把 `VITE_API_BASE_URL` 设为 `/`，由 nginx 代理 `/api/*` 到 API 容器。
-- 若你在 `.env` 中自定义 `CORS_ORIGIN`、`WEB_ORIGIN` 或 `MINIO_PUBLIC_BASE_URL`，compose overlay 会继续尊重这些值，不再强行覆盖。
-- 如果你接入自定义反向代理，SSE 路径必须关闭 buffering；当前 `infra/nginx/web.conf` 已对 `/api/` 设置 `proxy_buffering off` 和 `X-Accel-Buffering: no`。
-
-### Docker 运行说明（最小运维）
-
-1. 复制环境变量模板并只填写必要项：
-
-```powershell
-Copy-Item .env.example .env
-```
-
-至少确认：
-
-- `YUNWU_API_KEY`：留空时走 mock；填值时不要提交到仓库
-- `AUTH_SESSION_SECRET`：演示环境建议改成自定义随机值
-- `MINIO_ROOT_PASSWORD`：如需共享环境，建议改掉默认值
-
-2. 启动完整栈：
-
-```powershell
-pnpm docker:up
-```
-
-3. 检查容器状态：
-
-```powershell
-pnpm docker:ps
-```
-
-预期核心容器：
-
-- `yunwu-postgres`
-- `yunwu-redis`
-- `yunwu-minio`
-- `yunwu-minio-init`（一次性执行完成后退出）
-- `yunwu-api`
-- `yunwu-worker`
-- `yunwu-web`
-
-4. 如需手动重跑迁移：
-
-```powershell
-pnpm docker:migrate
-```
-
-说明：
-
-- `api` 容器启动时默认先执行 `prisma migrate deploy`，正常情况下不需要单独跑
-- `worker` 不暴露公网端口，只看容器健康检查和日志
-- `web` 提供用户工作台与 `/admin` 管理入口，API 通过同域 `/api/*` 代理
-
-5. 常用运维动作：
-
-```powershell
-# 查看最近日志
-pnpm docker:logs
-
-# 重启应用层（不动数据卷）
-docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml restart api worker web
-
-# 停止完整栈
-pnpm docker:down
-```
-
-### Windows Prisma DLL 锁
-
-Windows 上如果 `prisma generate` / `pnpm build` 报 `query_engine-windows.dll.node` 被占用，先停止正在运行的 API / Worker / `node.exe` 进程后再重试；通常是 Prisma 引擎文件被本地开发进程锁住。
-
-当前仓库提供图片工作台的 API、异步任务 Worker、Web 工作台与本地基础设施：
-
-- `apps/api`：NestJS HTTP API、鉴权、SSE、Prisma 数据访问、BullMQ 入队逻辑
-- `apps/api` Worker 入口：独立消费 BullMQ 图片任务，调用上游、写入数据库与对象存储
-- `apps/web`：Vite + React 工作台
-- `packages/shared`：共享类型与接口定义
-- `infra`：PostgreSQL、Redis、MinIO 的本地 `docker compose` 配置
-
-API 和 Worker 是两个正式拆分的进程：API 只负责 HTTP / SSE / 入队，Worker 只负责消费队列。二者共享 `DATABASE_URL`、`REDIS_URL`、对象存储和上游 `YUNWU_*` 配置；生产环境必须分别拉起至少 1 个 API 进程和 1 个 Worker 进程。
-
-## 运行前提清单
-
-- Node.js 22+、Corepack、`pnpm@10.17.1`
-- Docker Desktop 或兼容 Docker Engine（本地 Postgres / Redis / MinIO）
-- `.env` 已从 `.env.example` 复制并按需调整
-- `DATABASE_URL` 指向可用 PostgreSQL，且已执行 Prisma migration
-- `REDIS_URL` 指向可用 Redis；Redis 是 BullMQ 队列的必需依赖
+- `DATABASE_URL` 指向可用 PostgreSQL
+- `REDIS_URL` 指向可用 Redis
 - `TASK_QUEUE_NAME` 在 API 与 Worker 中保持一致
-- Worker 进程已启动；否则任务只会停留在 `queued` / `submitted`
-- `YUNWU_API_KEY` 未配置时会走本地 mock 结果；配置后才会调用真实上游
+- Worker 已启动，否则任务会停在 `queued` / `submitted`
+- `YUNWU_API_KEY` 留空时走 mock；配置后走真实上游
 
-## 快速开始
-
-```powershell
-corepack enable
-corepack prepare pnpm@10.17.1 --activate
-pnpm install
-Copy-Item .env.example .env
-```
-
-## 本地开发启动顺序
-
-1. 启动基础设施：
-
-```powershell
-cd infra
-docker compose --env-file ..\.env up -d
-cd ..
-```
-
-2. 生成 Prisma Client 并执行迁移：
-
-```powershell
-pnpm --filter @yunwu/api prisma:generate
-pnpm --filter @yunwu/api prisma:migrate
-```
-
-3. 分别启动 API、Worker、Web（建议 3 个终端）：
-
-```powershell
-# 终端 1：API 进程，只提供 HTTP / SSE / 入队
-pnpm --filter @yunwu/api dev:api
-
-# 终端 2：Worker 进程，只消费 BullMQ 队列
-pnpm --filter @yunwu/api dev:worker
-
-# 终端 3：Web 工作台
-pnpm --filter @yunwu/web dev
-```
-
-如果当前分支仍处于拆分过渡期，只有 `pnpm --filter @yunwu/api dev` 一个入口，请确保 API 侧禁用内置消费，Worker 侧单独启用消费；最终以 `apps/api/package.json` 中的 `dev:api` / `dev:worker` 脚本为准。
-
-## 生产启动方式
-
-生产环境不要把 API 和 Worker 合在同一个进程里运行：
-
-```powershell
-pnpm --filter @yunwu/api build
-pnpm --filter @yunwu/web build
-
-# 迁移只执行一次，通常由发布流水线或一次性 Job 负责
-pnpm --filter @yunwu/api prisma:generate
-pnpm --filter @yunwu/api prisma:migrate
-
-# API 服务进程
-pnpm --filter @yunwu/api start:api
-
-# Worker 服务进程，可按队列压力水平扩容
-pnpm --filter @yunwu/api start:worker
-```
-
-部署要点：
-
-- API 进程暴露 `PORT`，负责 `/health`、`/api/*`、SSE 与静态资产代理
-- Worker 进程不需要暴露公网端口，但必须能访问 PostgreSQL、Redis、对象存储和上游 API
-- 多个 Worker 可并行运行；单进程并发由 `TASK_WORKER_CONCURRENCY` 控制
-- 多个 API 副本承载 SSE 时，需要保持连接不被代理缓冲；若 Worker 与 API 跨进程通知依赖 Redis / pubsub 或队列事件，确认二者使用同一 `REDIS_URL`
-
-## 环境变量说明
-
-最小必需配置：
+最小必需环境变量：
 
 ```env
 DATABASE_URL=postgresql://postgres:postgres@localhost:5432/yunwu_platform?schema=public
@@ -243,171 +235,39 @@ TASK_WORKER_ENABLED=true
 TASK_WORKER_CONCURRENCY=2
 ```
 
-关键规则：
+对象存储模式：
 
-- `DATABASE_URL`：Prisma 与 API / Worker 共用；Prisma schema 路径由 API 包内 Prisma 配置或 package script 管理
-- `REDIS_URL`：BullMQ 必需；API 负责 `Queue.add`，Worker 负责 `Worker.process`
-- `TASK_QUEUE_NAME`：API 与 Worker 必须完全一致；Redis key 形如 `bull:<queueName>:*`
-- `TASK_QUEUE_ENABLED`：保留给兼容实现；正式拆分后队列应默认启用
-- `TASK_WORKER_ENABLED`：用于过渡期或共享模块入口控制 Worker 消费；API 进程不应消费任务
-- `TASK_WORKER_CONCURRENCY`：Worker 单进程并发；优先使用它，`TASK_QUEUE_CONCURRENCY` 仅作兼容旧配置
+- `STORAGE_MODE=local`
+  - 本地文件存储，适合联调
+- `STORAGE_MODE=minio`
+  - 本地模拟真实对象存储，推荐开发默认
+- `STORAGE_MODE=s3`
+  - 真实 S3 / 兼容 S3
 
-## 最小烟测步骤
+## 健康检查
 
-以下命令假设 API 在 `http://localhost:3000`，且已启动 Worker。
+- `/health`
+  - 轻量存活检查，不访问外部依赖
+- `/readiness`
+  - 检查 PostgreSQL、Redis，以及对象存储可用性
 
-```powershell
-$base = "http://localhost:3000"
+Worker 不额外暴露 HTTP 端口，使用容器健康检查执行 `apps/api/dist/health/worker-readiness.js`。
 
-curl.exe -i "$base/health"
-curl.exe -i "$base/api/capabilities"
+## 常见问题
 
-curl.exe -i -c cookies.txt `
-  -H "Content-Type: application/json" `
-  -d '{"email":"demo@yunwu.local","password":"demo123456"}' `
-  "$base/api/auth/login"
+- `docker` 命令失败
+  - 确认 Docker Desktop 已启动
+- 任务一直 `queued`
+  - Worker 未启动、Redis 不通，或 `TASK_QUEUE_NAME` 不一致
+- SSE 只有心跳，没有任务更新
+  - 检查 Worker 是否消费同一个会话链路、Redis / DB 是否一致、代理是否关闭缓冲
+- 注册或登录后未保持登录态
+  - 检查 `.env` 的 `AUTH_COOKIE_SECURE=false`，并确认 `CORS_ORIGIN` 包含 `http://127.0.0.1:5173`
+- Prisma DLL 被占用
+  - Windows 下先关闭 API / Worker / 相关 `node.exe` 再重试
 
-$conversation = curl.exe -s -b cookies.txt `
-  -H "Content-Type: application/json" `
-  -d '{"title":"local smoke"}' `
-  "$base/api/conversations" | ConvertFrom-Json
-$conversationId = $conversation.conversation.id
+## 更多文档
 
-$task = curl.exe -s -b cookies.txt `
-  -H "Content-Type: application/json" `
-  -d ('{"conversationId":"' + $conversationId + '","capability":"image.generate","model":"gpt-image-1","prompt":"local smoke test"}') `
-  "$base/api/tasks" | ConvertFrom-Json
-$taskId = $task.task.id
-
-curl.exe -s -b cookies.txt "$base/api/tasks/$taskId"
-```
-
-预期结果：
-
-- `/health` 返回 `status: ok`
-- 登录接口写入 `cookies.txt`
-- 创建任务返回 `task.status=queued`
-- Worker 正常消费后，任务状态进入 `submitted` / `running`，最终为 `succeeded` 或 `failed`
-
-## Redis / BullMQ 验证
-
-确认 Redis 可用：
-
-```powershell
-cd infra
-docker compose --env-file ..\.env ps redis
-docker exec yunwu-redis redis-cli ping
-cd ..
-```
-
-提交任务后检查 BullMQ key：
-
-```powershell
-docker exec yunwu-redis redis-cli --scan --pattern "bull:*"
-docker exec yunwu-redis redis-cli llen "bull:yunwu-image-tasks:wait"
-docker exec yunwu-redis redis-cli llen "bull:yunwu-image-tasks:active"
-docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-tasks:completed"
-docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-tasks:failed"
-```
-
-判断方式：
-
-- `wait` 增长但不减少：API 能入队，但 Worker 未启动、连错 Redis，或 `TASK_QUEUE_NAME` 不一致
-- `active` 长时间不归零：Worker 卡在上游调用、对象存储或数据库写入
-- `failed` 增长：查看 Worker 日志和任务详情里的 `errorMessage`
-- 没有 `bull:*` key：API 未成功入队，优先检查 `REDIS_URL` 与 API 日志
-
-## SSE 验证
-
-打开一个终端保持 SSE 连接：
-
-```powershell
-curl.exe -N -b cookies.txt "http://localhost:3000/api/conversations/$conversationId/events"
-```
-
-再用另一个终端提交任务，SSE 终端应至少看到：
-
-- `connected`：连接建立
-- `heartbeat`：约每 25 秒一次，说明 API 与代理没有缓冲 / 断开 SSE
-- `task.updated` / `conversation.updated`：提交任务或 Worker 更新任务时推送
-
-如果只有 `heartbeat` 没有任务更新：
-
-- 确认 Worker 正在消费同一个 `TASK_QUEUE_NAME`
-- 确认 Worker 与 API 使用同一 `DATABASE_URL`、`REDIS_URL`
-- 检查 Worker 到 API 的跨进程事件桥是否启用；正式拆分后不能依赖单进程内存事件
-- 反向代理需关闭 SSE 缓冲，Nginx 可参考 `X-Accel-Buffering: no`
-
-## 对象存储模式
-
-### 1. 本地 fallback
-
-适合不启 MinIO、只想先跑通 API / Web 联调。
-
-```env
-STORAGE_MODE=local
-LOCAL_STORAGE_PATH=./storage
-PUBLIC_ASSET_BASE_URL=http://localhost:3000/api/assets
-```
-
-### 2. MinIO 模式
-
-适合本地模拟真实对象存储，和后续 S3 接入方式保持一致。
-
-```env
-STORAGE_MODE=minio
-MINIO_ENDPOINT=localhost
-MINIO_PORT=9000
-MINIO_ROOT_USER=minioadmin
-MINIO_ROOT_PASSWORD=minioadmin
-MINIO_BUCKET=yunwu-assets
-MINIO_USE_SSL=false
-```
-
-验证：
-
-- MinIO API：`http://localhost:9000/minio/health/live`
-- MinIO Console：`http://localhost:9001`
-- bucket 名称与 `.env` 中 `MINIO_BUCKET` 保持一致
-
-### 3. 真实 S3 / 兼容 S3
-
-```env
-STORAGE_MODE=s3
-S3_ENDPOINT=
-S3_REGION=auto
-S3_BUCKET=
-S3_ACCESS_KEY_ID=
-S3_SECRET_ACCESS_KEY=
-S3_FORCE_PATH_STYLE=false
-S3_PUBLIC_BASE_URL=
-```
-
-## 当前接口
-
-- `GET /health`
-- `POST /api/auth/login`
-- `GET /api/auth/me`
-- `POST /api/auth/logout`
-- `GET /api/capabilities`
-- `GET /api/models`
-- `GET /api/conversations`
-- `POST /api/conversations`
-- `GET /api/conversations/:id`
-- `GET /api/conversations/:id/events`
-- `GET /api/tasks`
-- `POST /api/tasks`
-- `GET /api/tasks/:id`
-- `POST /api/assets/upload`
-- `GET /api/assets/:storageKey/content`
-
-## 常见失败排查
-
-- API 启动失败并提示 `REDIS_URL is required`：`.env` 未加载或 Redis 配置缺失
-- 任务一直 `queued`：Worker 未启动、连错 Redis，或 API / Worker 的 `TASK_QUEUE_NAME` 不一致
-- 任务一直 `running`：检查 Worker 日志、上游 `YUNWU_API_KEY`、对象存储和数据库连接
-- Prisma 报连接错误：先确认 `docker exec yunwu-postgres pg_isready -U postgres -d yunwu_platform` 通过，再确认 `DATABASE_URL`
-- BullMQ key 名称不符合预期：以 `.env` 的 `TASK_QUEUE_NAME` 为准，默认是 `bull:yunwu-image-tasks:*`
-- SSE 连接立即断开：检查登录 cookie、会话权限、代理超时和缓冲配置
-- SSE 有心跳但无任务更新：检查 Worker 是否已消费，并确认拆分后的跨进程事件通知链路已启用
-- MinIO 上传失败：确认 `STORAGE_MODE`、`MINIO_*`、bucket 创建状态，以及 API / Worker 都能访问同一 endpoint
+- Windows 本地启动与测试：[docs/qa/windows-local-startup.md](docs/qa/windows-local-startup.md)
+- round-2 PRD v0.2：[docs/prd/round-2-personal-user-prd-v0.2.md](docs/prd/round-2-personal-user-prd-v0.2.md)
+- PM 交接：[docs/handoff/pm-handoff-round-1-to-round-2.md](docs/handoff/pm-handoff-round-1-to-round-2.md)
