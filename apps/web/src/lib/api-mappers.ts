@@ -387,20 +387,71 @@ export function getComposerSubmissionGuard(input: {
   };
 }
 
-export function resolveAssetUrl(url?: string) {
-  if (!url) {
+const LOOPBACK_ASSET_HOSTS = new Set(["127.0.0.1", "localhost", "minio"]);
+
+function getCurrentApiBaseUrl() {
+  const baseUrl = apiClient.getBaseUrl();
+  try {
+    return new URL(
+      baseUrl,
+      typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function buildCurrentAssetProxyUrl(storageKey?: string) {
+  if (!storageKey) {
     return undefined;
   }
 
+  const base = getCurrentApiBaseUrl();
+  if (!base) {
+    return undefined;
+  }
+
+  return new URL(
+    `/api/assets/${encodeURIComponent(storageKey)}/content`,
+    base,
+  ).toString();
+}
+
+function shouldUseAssetProxy(url: URL) {
+  return (
+    url.pathname.startsWith("/api/assets/") ||
+    LOOPBACK_ASSET_HOSTS.has(url.hostname)
+  );
+}
+
+export function resolveAssetUrl(url?: string, storageKey?: string) {
+  if (!url) {
+    return buildCurrentAssetProxyUrl(storageKey);
+  }
+
+  const proxyUrl = buildCurrentAssetProxyUrl(storageKey);
+
   try {
-    const resolved = new URL(url, apiClient.getBaseUrl());
-    const base = new URL(apiClient.getBaseUrl());
-    if (resolved.origin !== base.origin && resolved.pathname.startsWith("/api/assets/")) {
+    const base = getCurrentApiBaseUrl();
+    const resolved = new URL(
+      url,
+      base ?? (typeof window === "undefined" ? "http://127.0.0.1" : window.location.origin),
+    );
+
+    if (proxyUrl && shouldUseAssetProxy(resolved)) {
+      return proxyUrl;
+    }
+
+    if (base && resolved.origin !== base.origin && resolved.pathname.startsWith("/api/assets/")) {
       return new URL(`${resolved.pathname}${resolved.search}`, base).toString();
     }
 
     return resolved.toString();
   } catch {
+    if (proxyUrl) {
+      return proxyUrl;
+    }
+
     return url;
   }
 }
@@ -442,7 +493,8 @@ export function toUiTaskAsset(asset: AssetRecord): UiTaskAsset {
   return {
     id: asset.id,
     type: asset.type,
-    url: resolveAssetUrl(asset.url),
+    url: resolveAssetUrl(asset.url, asset.storageKey),
+    storageKey: asset.storageKey,
     mimeType: asset.mimeType,
     width: asset.width,
     height: asset.height,
@@ -587,7 +639,8 @@ export function toImageResults(tasks: TaskRecord[], assets: AssetRecord[]): UiIm
               : asset.mimeType ?? "未知尺寸",
           model: task?.modelId ?? "unknown",
           badge: `结果 ${index + 1}`,
-          url: resolveAssetUrl(asset.url),
+          url: resolveAssetUrl(asset.url, asset.storageKey),
+          storageKey: asset.storageKey,
         },
       ];
     });

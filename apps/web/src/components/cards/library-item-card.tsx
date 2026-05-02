@@ -24,7 +24,7 @@ export function LibraryItemCard({
     return null;
   }
 
-  const assetUrl = resolveAssetUrl(item.asset.url);
+  const assetUrl = resolveAssetUrl(item.asset.url, item.asset.storageKey);
 
   return (
     <Card className="overflow-hidden">

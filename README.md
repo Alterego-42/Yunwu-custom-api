@@ -1,8 +1,8 @@
 # Yunwu Custom API
 
-面向个人用户的 AI 图片生成与编辑工作台。`v0.4.2` 收口重点是桌面友好的发布方式：API、Worker、Web 发布为 GHCR Docker 镜像，Windows portable 包是 Electron 桌面窗体应用；桌面壳会依赖 Docker Desktop 运行本地服务栈，用户不需要在本机执行 `pnpm install`。
+面向个人用户的 AI 图片生成与编辑工作台。`v0.4.3` 收口重点是桌面版运行稳定性：API、Worker、Web 发布为 GHCR Docker 镜像，Windows portable 包是 Electron 桌面窗体应用；桌面壳会依赖 Docker Desktop 运行本地服务栈，用户不需要在本机执行 `pnpm install`。
 
-当前推荐版本：`v0.4.2`
+当前推荐版本：`v0.4.3`
 
 ## 当前能力
 
@@ -13,7 +13,7 @@
 - PostgreSQL、Redis、MinIO 本地依赖栈
 - 管理台 `/admin`：provider/model 配置、任务与健康状态、DEBUG 级运行日志辅助排障
 - Docker 镜像发布：`api`、`worker`、`web` 三个 target
-- Windows portable Electron 桌面壳：基于 Docker Desktop 拉取 v0.4.2 镜像运行本地服务栈
+- Windows portable Electron 桌面壳：基于 Docker Desktop 拉取 v0.4.3 镜像运行本地服务栈
 
 ## 仓库结构
 
@@ -21,8 +21,8 @@
 - `apps/web`：Vite + React 前台工作台与管理页
 - `packages/shared`：共享类型与常量
 - `infra`：PostgreSQL、Redis、MinIO、Docker Compose
-- `.github/workflows/release.yml`：v0.4.2 发布工程 workflow
-- `docs/release/v0.4.2.md`：release notes 草案
+- `.github/workflows/release.yml`：v0.4.3 发布工程 workflow
+- `docs/release/v0.4.3.md`：release notes 草案
 
 ## Windows Portable 使用
 
@@ -32,9 +32,9 @@
 - Docker Desktop 已安装并启动
 - 可访问 GHCR 镜像仓库
 
-Release artifact 中的 `Yunwu Desktop-0.4.2-win-x64-portable.zip` 是 Electron 桌面窗体应用。解压后运行桌面程序，桌面壳负责检查 Docker CLI/daemon，并使用内置 compose 文件拉起 API、Worker、Web、PostgreSQL、Redis、MinIO。
+Release artifact 中的 `Yunwu Desktop-0.4.3-win-x64-portable.zip` 是 Electron 桌面窗体应用。解压后运行桌面程序，桌面壳负责检查 Docker CLI/daemon，并使用内置 compose 文件拉起 API、Worker、Web、PostgreSQL、Redis、MinIO。
 
-如需不经过桌面壳、直接验证同一组 v0.4.2 镜像，可手动运行：
+如需不经过桌面壳、直接验证同一组 v0.4.3 镜像，可手动运行：
 
 ```powershell
 Copy-Item .env.example .env
@@ -56,10 +56,10 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.desktop.yml down
 ```
 
-默认镜像标签是 `v0.4.2`。如需覆盖：
+默认镜像标签是 `v0.4.3`。如需覆盖：
 
 ```env
-YUNWU_IMAGE_TAG=v0.4.2
+YUNWU_IMAGE_TAG=v0.4.3
 YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42
 ```
 
@@ -173,10 +173,11 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 
 - `docker` 命令失败：确认 Docker Desktop 已启动，并且当前终端能执行 `docker compose version`。
 - GHCR 镜像拉取失败：确认网络和 GHCR 访问权限；私有仓库镜像需要先 `docker login ghcr.io`。
+- 桌面版关闭后容器仍运行：请升级到 `v0.4.3`；桌面壳退出时会执行当前实例的 `docker compose down`，保留数据卷。
 - 任务一直 `queued`：检查 Worker 是否健康、Redis 是否可用、API 与 Worker 的 `TASK_QUEUE_NAME` 是否一致。
 - SSE 只有心跳：检查 Worker 日志、Redis/DB 是否一致，以及代理是否关闭缓冲。
 - 真实生成失败：确认 `YUNWU_API_KEY`、`YUNWU_BASE_URL`、provider/model 配置有效。
-- 上传或结果图片不可访问：检查 MinIO 是否健康、`MINIO_BUCKET` 是否初始化、`MINIO_PUBLIC_BASE_URL` 是否指向宿主可访问地址。
+- 上传或结果图片不可访问：检查 MinIO 是否健康、`MINIO_BUCKET` 是否初始化；`v0.4.3` 起历史图片会按当前实例端口重新代理，不依赖旧端口。
 - 登录态丢失：本地默认应使用 `AUTH_COOKIE_SECURE=false`，并避免混用 `localhost` 与 `127.0.0.1`。
 - Prisma DLL 被占用：Windows 下先关闭 API、Worker 和相关 `node.exe` 进程再重试。
 
@@ -184,4 +185,4 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 
 - Docker 运维交接：[docs/infra/docker-ops-handoff.md](docs/infra/docker-ops-handoff.md)
 - Windows 本地启动与测试：[docs/qa/windows-local-startup.md](docs/qa/windows-local-startup.md)
-- v0.4.2 release notes 草案：[docs/release/v0.4.2.md](docs/release/v0.4.2.md)
+- v0.4.3 release notes 草案：[docs/release/v0.4.3.md](docs/release/v0.4.3.md)

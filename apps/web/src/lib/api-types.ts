@@ -306,6 +306,7 @@ export type UiTaskAsset = {
   id: string;
   type: AssetRecord["type"];
   url?: string;
+  storageKey?: string;
   mimeType?: string;
   width?: number;
   height?: number;
@@ -358,6 +359,7 @@ export type UiImageResult = {
   model: string;
   badge: string;
   url?: string;
+  storageKey?: string;
 };
 
 export type {

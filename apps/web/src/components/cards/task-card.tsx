@@ -186,7 +186,7 @@ export function TaskAssetPreview({
 }: {
   asset: NonNullable<UiTask["resultAssets"]>[number];
 }) {
-  const assetUrl = resolveAssetUrl(asset.url);
+  const assetUrl = resolveAssetUrl(asset.url, asset.storageKey);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const content = (
     <>
@@ -369,7 +369,7 @@ export function TaskCard({
             <div className="text-xs font-medium text-muted-foreground">参考素材</div>
             <div className="flex flex-wrap gap-2">
               {task.inputAssets?.map((asset) => {
-                const assetUrl = resolveAssetUrl(asset.url);
+                const assetUrl = resolveAssetUrl(asset.url, asset.storageKey);
 
                 return assetUrl ? (
                   <TaskInputAssetPreview

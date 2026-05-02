@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildTaskRoundNavigation,
@@ -35,6 +35,7 @@ function createAsset(overrides: Partial<AssetRecord> = {}): AssetRecord {
     taskId: "task_1",
     type: "generated",
     url: "/api/assets/asset_1/content",
+    storageKey: "asset_1.png",
     createdAt: "2026-04-24T10:02:00.000Z",
     ...overrides,
   };
@@ -52,6 +53,10 @@ function createModel(overrides: Partial<ModelRecord> = {}): ModelRecord {
 }
 
 describe("api mappers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("reuses generated output asset ids for re-edit even if detail assets are missing", () => {
     const task = createTask({
       outputSummary: {
@@ -166,6 +171,69 @@ describe("api mappers", () => {
 
     expect(new URL(resolved ?? "").pathname).toBe("/api/assets/asset_1/content");
     expect(new URL(resolved ?? "").origin).toBe(new URL(apiClient.getBaseUrl()).origin);
+  });
+
+  it("normalizes old absolute asset proxy urls through the current relative api base", () => {
+    vi.spyOn(apiClient, "getBaseUrl").mockReturnValue("/api");
+
+    const resolved = resolveAssetUrl(
+      "http://127.0.0.1:4304/api/assets/old-storage-key.png/content",
+      "old-storage-key.png",
+    );
+
+    expect(resolved).toBe(
+      `${window.location.origin}/api/assets/old-storage-key.png/content`,
+    );
+    expect(resolved).not.toContain("4304");
+  });
+
+  it("uses the current asset proxy for stale loopback object urls when storageKey is available", () => {
+    vi.spyOn(apiClient, "getBaseUrl").mockReturnValue("http://127.0.0.1:4305/api");
+
+    const resolved = resolveAssetUrl(
+      "http://127.0.0.1:19000/yunwu-assets/old-storage-key.png",
+      "old-storage-key.png",
+    );
+
+    expect(resolved).toBe(
+      "http://127.0.0.1:4305/api/assets/old-storage-key.png/content",
+    );
+  });
+
+  it("maps task and image result assets to current proxy urls using storageKey", () => {
+    vi.spyOn(apiClient, "getBaseUrl").mockReturnValue("/api");
+    const staleAsset = createAsset({
+      url: "http://127.0.0.1:19000/yunwu-assets/asset_1.png",
+      storageKey: "asset_1.png",
+    });
+    const task = createTask({
+      outputSummary: {
+        generatedAssetIds: [staleAsset.id],
+      },
+    });
+
+    const uiTask = toUiTask(task, [staleAsset]);
+    const imageResults = toImageResults([task], [staleAsset]);
+
+    expect(uiTask.resultAssets?.[0]?.url).toBe(
+      `${window.location.origin}/api/assets/asset_1.png/content`,
+    );
+    expect(uiTask.resultAssets?.[0]?.storageKey).toBe("asset_1.png");
+    expect(imageResults[0]?.url).toBe(
+      `${window.location.origin}/api/assets/asset_1.png/content`,
+    );
+    expect(imageResults[0]?.storageKey).toBe("asset_1.png");
+  });
+
+  it("keeps external public asset urls when they are not API proxy URLs", () => {
+    vi.spyOn(apiClient, "getBaseUrl").mockReturnValue("/api");
+
+    const resolved = resolveAssetUrl(
+      "https://cdn.example.com/yunwu-assets/asset.png",
+      "asset.png",
+    );
+
+    expect(resolved).toBe("https://cdn.example.com/yunwu-assets/asset.png");
   });
 
   it("does not expose generated assets on failed tasks", () => {

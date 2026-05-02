@@ -58,7 +58,8 @@ let runtimePorts: RuntimePorts = { ...preferredPorts };
 let blockedHostPorts = new Set<number>();
 let runtimeIdentity: RuntimeIdentity | undefined;
 let currentComposeFiles: { envPath: string; overridePath: string } | undefined;
-let isQuittingAfterCleanup = false;
+let isExitingAfterCleanup = false;
+let shutdownCleanupPromise: Promise<void> | undefined;
 
 type RuntimeIdentity = {
   instanceId: string;
@@ -417,7 +418,7 @@ async function writeRuntimeFiles() {
     `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
     `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.web}/api/assets`,
     "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
-    "YUNWU_IMAGE_TAG=v0.4.2",
+    "YUNWU_IMAGE_TAG=v0.4.3",
     `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
   ].join("\n");
 
@@ -654,6 +655,7 @@ async function startCompose(envPath: string, overridePath: string) {
 
 async function stopCompose() {
   if (!currentComposeFiles) {
+    log.info("Desktop compose shutdown skipped: runtime compose files are not available.");
     return;
   }
 
@@ -669,7 +671,35 @@ async function stopCompose() {
     "-f",
     currentComposeFiles.overridePath
   ];
+  log.info(`Desktop compose shutdown started for env ${currentComposeFiles.envPath}.`);
   await runComposeProcess(["compose", ...composeFiles, "down"], "正在关闭当前桌面实例服务栈，保留数据卷。");
+  log.info("Desktop compose shutdown completed successfully.");
+}
+
+function performShutdownCleanup(reason: string) {
+  if (shutdownCleanupPromise) {
+    log.info(`Desktop shutdown cleanup already running; joined by ${reason}.`);
+    return shutdownCleanupPromise;
+  }
+
+  shutdownCleanupPromise = (async () => {
+    log.info(`Desktop shutdown cleanup started by ${reason}.`);
+    if (currentProcess) {
+      log.info("Stopping active docker compose command before shutdown cleanup.");
+      currentProcess.kill();
+      currentProcess = undefined;
+    }
+
+    try {
+      await stopCompose();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`Desktop compose shutdown failed: ${message}`);
+      throw error;
+    }
+  })();
+
+  return shutdownCleanupPromise;
 }
 
 async function probe(url: string) {
@@ -790,6 +820,22 @@ async function createWindow() {
   });
 
   await mainWindow.loadFile(join(__dirname, "..", "renderer", "index.html"));
+  mainWindow.on("close", (event) => {
+    if (isExitingAfterCleanup || !currentComposeFiles) {
+      return;
+    }
+
+    event.preventDefault();
+    void performShutdownCleanup("window close")
+      .catch(() => {
+        // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
+      })
+      .finally(() => {
+        isExitingAfterCleanup = true;
+        mainWindow?.destroy();
+        app.exit(0);
+      });
+  });
   void startStack();
 }
 
@@ -824,23 +870,34 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
-  currentProcess?.kill();
-});
-
-app.on("will-quit", (event) => {
-  if (isQuittingAfterCleanup || !currentComposeFiles) {
+app.on("before-quit", (event) => {
+  if (isExitingAfterCleanup || !currentComposeFiles) {
     return;
   }
 
   event.preventDefault();
-  isQuittingAfterCleanup = true;
-  stopCompose()
-    .catch((error) => {
-      const message = error instanceof Error ? error.message : String(error);
-      log.error(`Failed to stop desktop compose stack: ${message}`);
+  void performShutdownCleanup("before-quit")
+    .catch(() => {
+      // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
     })
     .finally(() => {
-      app.quit();
+      isExitingAfterCleanup = true;
+      app.exit(0);
+    });
+});
+
+app.on("will-quit", (event) => {
+  if (isExitingAfterCleanup || !currentComposeFiles) {
+    return;
+  }
+
+  event.preventDefault();
+  void performShutdownCleanup("will-quit")
+    .catch(() => {
+      // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
+    })
+    .finally(() => {
+      isExitingAfterCleanup = true;
+      app.exit(0);
     });
 });

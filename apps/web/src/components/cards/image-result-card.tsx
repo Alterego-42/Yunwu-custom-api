@@ -7,7 +7,7 @@ import { resolveAssetUrl } from "@/lib/api-mappers";
 import type { UiImageResult } from "@/lib/api-types";
 
 export function ImageResultCard({ item }: { item: UiImageResult }) {
-  const assetUrl = resolveAssetUrl(item.url);
+  const assetUrl = resolveAssetUrl(item.url, item.storageKey);
 
   return (
     <Card className="overflow-hidden border-white/10 bg-white/[0.03]">
