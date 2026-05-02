@@ -1,9 +1,9 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import log from "electron-log/main";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
@@ -25,6 +25,8 @@ type DesktopStatus = {
   services: ServiceStatus[];
   webUrl: string;
   adminUrl: string;
+  instanceId: string;
+  composeProjectName: string;
   userDataPath: string;
   logPath: string;
 };
@@ -37,10 +39,6 @@ function getPortEnv(name: string, fallback: number) {
 type RuntimePorts = {
   web: number;
   api: number;
-  postgres: number;
-  redis: number;
-  minio: number;
-  minioConsole: number;
 };
 
 type RuntimeUrls = {
@@ -53,15 +51,20 @@ type RuntimeUrls = {
 
 const preferredPorts = {
   web: getPortEnv("YUNWU_DESKTOP_WEB_PORT", 5173),
-  api: getPortEnv("YUNWU_DESKTOP_API_PORT", 3000),
-  postgres: getPortEnv("YUNWU_DESKTOP_POSTGRES_PORT", 5432),
-  redis: getPortEnv("YUNWU_DESKTOP_REDIS_PORT", 6379),
-  minio: getPortEnv("YUNWU_DESKTOP_MINIO_PORT", 9000),
-  minioConsole: getPortEnv("YUNWU_DESKTOP_MINIO_CONSOLE_PORT", 9001)
+  api: getPortEnv("YUNWU_DESKTOP_API_PORT", 3000)
 } satisfies RuntimePorts;
 
 let runtimePorts: RuntimePorts = { ...preferredPorts };
 let blockedHostPorts = new Set<number>();
+let runtimeIdentity: RuntimeIdentity | undefined;
+let currentComposeFiles: { envPath: string; overridePath: string } | undefined;
+let isQuittingAfterCleanup = false;
+
+type RuntimeIdentity = {
+  instanceId: string;
+  composeProjectName: string;
+  sessionSecret: string;
+};
 
 function getRuntimeUrls(): RuntimeUrls {
   const webUrl = `http://127.0.0.1:${runtimePorts.web}`;
@@ -95,6 +98,8 @@ const status: DesktopStatus = {
   ],
   webUrl: getRuntimeUrls().webUrl,
   adminUrl: getRuntimeUrls().adminUrl,
+  instanceId: "",
+  composeProjectName: "",
   userDataPath: "",
   logPath: ""
 };
@@ -173,6 +178,38 @@ function getResourcePath(...parts: string[]) {
   const [first, ...rest] = parts;
   const fallbackRoot = fallbackMap[first] ?? join(repoRoot, first);
   return join(fallbackRoot, ...rest);
+}
+
+function stableHash(value: string) {
+  return createHash("sha256").update(value.toLowerCase()).digest("hex").slice(0, 12);
+}
+
+function sanitizeInstanceId(value: string) {
+  const sanitized = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return sanitized || "desktop";
+}
+
+async function loadRuntimeIdentity(runtimeDir: string, userData: string): Promise<RuntimeIdentity> {
+  const identityPath = join(runtimeDir, "identity.json");
+  let storedIdentity: Partial<RuntimeIdentity> = {};
+  try {
+    storedIdentity = JSON.parse(await readFile(identityPath, "utf8")) as Partial<RuntimeIdentity>;
+  } catch {
+  }
+
+  const envInstanceId = process.env.YUNWU_INSTANCE_ID;
+  const instanceId = sanitizeInstanceId(
+    envInstanceId && envInstanceId.trim()
+      ? envInstanceId
+      : storedIdentity.instanceId || `desktop${stableHash(userData)}`
+  );
+  const identity = {
+    instanceId,
+    composeProjectName: `yunwu-${instanceId}`,
+    sessionSecret: storedIdentity.sessionSecret || randomBytes(32).toString("hex")
+  };
+  await writeFile(identityPath, `${JSON.stringify(identity, null, 2)}\n`, "utf8");
+  return identity;
 }
 
 function parsePortList(output: string) {
@@ -329,11 +366,7 @@ async function selectRuntimePorts() {
   }
   runtimePorts = {
     web: await selectPort("Web", preferredPorts.web, selectedPorts, unavailablePorts),
-    api: await selectPort("API", preferredPorts.api, selectedPorts, unavailablePorts),
-    postgres: await selectPort("Postgres", preferredPorts.postgres, selectedPorts, unavailablePorts),
-    redis: await selectPort("Redis", preferredPorts.redis, selectedPorts, unavailablePorts),
-    minio: await selectPort("MinIO", preferredPorts.minio, selectedPorts, unavailablePorts),
-    minioConsole: await selectPort("MinIO Console", preferredPorts.minioConsole, selectedPorts, unavailablePorts)
+    api: await selectPort("API", preferredPorts.api, selectedPorts, unavailablePorts)
   };
 
   const urls = getRuntimeUrls();
@@ -346,24 +379,21 @@ async function writeRuntimeFiles() {
   const userData = app.getPath("userData");
   const runtimeDir = join(userData, "runtime");
   await mkdir(runtimeDir, { recursive: true });
+  runtimeIdentity = await loadRuntimeIdentity(runtimeDir, userData);
 
   const envPath = join(runtimeDir, ".env");
   const overridePath = join(runtimeDir, "docker-compose.override.yml");
   const appSourceDir = (process.env.YUNWU_DESKTOP_APP_SOURCE_DIR ?? getResourcePath("app-source")).replaceAll("\\", "/");
-  const sessionSecret = randomBytes(24).toString("hex");
 
   const env = [
-    "COMPOSE_PROJECT_NAME=yunwu-desktop",
+    `YUNWU_INSTANCE_ID=${runtimeIdentity.instanceId}`,
+    `COMPOSE_PROJECT_NAME=${runtimeIdentity.composeProjectName}`,
     "NODE_ENV=production",
     `PORT=${runtimePorts.api}`,
     `WEB_PORT=${runtimePorts.web}`,
     "POSTGRES_DB=yunwu_platform",
     "POSTGRES_USER=postgres",
     "POSTGRES_PASSWORD=postgres",
-    `POSTGRES_PORT=${runtimePorts.postgres}`,
-    `REDIS_PORT=${runtimePorts.redis}`,
-    `MINIO_PORT=${runtimePorts.minio}`,
-    `MINIO_CONSOLE_PORT=${runtimePorts.minioConsole}`,
     "MINIO_ROOT_USER=minioadmin",
     "MINIO_ROOT_PASSWORD=minioadmin",
     "MINIO_BUCKET=yunwu-assets",
@@ -379,15 +409,15 @@ async function writeRuntimeFiles() {
     "AUTH_DEMO_EMAIL=demo@yunwu.local",
     "AUTH_DEMO_PASSWORD=demo123456",
     "AUTH_DEMO_DISPLAY_NAME=Demo User",
-    `AUTH_SESSION_SECRET=${sessionSecret}`,
-    "AUTH_COOKIE_NAME=yunwu_session",
+    `AUTH_SESSION_SECRET=${runtimeIdentity.sessionSecret}`,
+    `AUTH_COOKIE_NAME=yunwu_session_${runtimeIdentity.instanceId}`,
     "AUTH_SESSION_TTL_HOURS=168",
     "AUTH_COOKIE_SECURE=false",
     `CORS_ORIGIN=http://127.0.0.1:${runtimePorts.web},http://localhost:${runtimePorts.web}`,
     `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
-    `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.minio}/yunwu-assets`,
+    `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.web}/api/assets`,
     "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
-    "YUNWU_IMAGE_TAG=v0.4.0",
+    "YUNWU_IMAGE_TAG=v0.4.1",
     `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
   ].join("\n");
 
@@ -408,7 +438,10 @@ async function writeRuntimeFiles() {
   await writeFile(overridePath, `${override}\n`, "utf8");
 
   status.userDataPath = userData;
+  status.instanceId = runtimeIdentity.instanceId;
+  status.composeProjectName = runtimeIdentity.composeProjectName;
   status.logPath = log.transports.file.getFile().path;
+  currentComposeFiles = { envPath, overridePath };
   return { envPath, overridePath };
 }
 
@@ -619,6 +652,26 @@ async function startCompose(envPath: string, overridePath: string) {
   );
 }
 
+async function stopCompose() {
+  if (!currentComposeFiles) {
+    return;
+  }
+
+  const infraCompose = getResourcePath("infra", "docker-compose.yml");
+  const desktopCompose = getResourcePath("infra", "docker-compose.desktop.yml");
+  const composeFiles = [
+    "--env-file",
+    currentComposeFiles.envPath,
+    "-f",
+    infraCompose,
+    "-f",
+    desktopCompose,
+    "-f",
+    currentComposeFiles.overridePath
+  ];
+  await runComposeProcess(["compose", ...composeFiles, "down"], "正在关闭当前桌面实例服务栈，保留数据卷。");
+}
+
 async function probe(url: string) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3000);
@@ -773,4 +826,21 @@ app.on("window-all-closed", () => {
 
 app.on("before-quit", () => {
   currentProcess?.kill();
+});
+
+app.on("will-quit", (event) => {
+  if (isQuittingAfterCleanup || !currentComposeFiles) {
+    return;
+  }
+
+  event.preventDefault();
+  isQuittingAfterCleanup = true;
+  stopCompose()
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      log.error(`Failed to stop desktop compose stack: ${message}`);
+    })
+    .finally(() => {
+      app.quit();
+    });
 });

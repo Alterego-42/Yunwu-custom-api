@@ -60,15 +60,30 @@ function getDefaultApiBaseUrl() {
   return `${window.location.protocol}//${window.location.hostname}:3000`;
 }
 
-const RAW_API_BASE_URL = normalizeLoopbackApiBaseUrl(
-  (import.meta.env.VITE_API_BASE_URL ?? getDefaultApiBaseUrl()).replace(
-    /\/$/,
-    "",
-  ),
-);
-const API_ROOT = RAW_API_BASE_URL.endsWith("/api")
-  ? RAW_API_BASE_URL
-  : `${RAW_API_BASE_URL}/api`;
+function normalizeApiRoot(value: string | undefined) {
+  const configured = value?.trim();
+  if (configured && /^\/+$/.test(configured)) {
+    return "/api";
+  }
+
+  const baseUrl = configured ? normalizeLoopbackApiBaseUrl(configured) : getDefaultApiBaseUrl();
+  const withoutTrailingSlashes = baseUrl.replace(/\/+$/, "");
+
+  if (!withoutTrailingSlashes || /^\/+$/.test(withoutTrailingSlashes)) {
+    return "/api";
+  }
+
+  return withoutTrailingSlashes.endsWith("/api")
+    ? withoutTrailingSlashes
+    : `${withoutTrailingSlashes}/api`;
+}
+
+function joinApiPath(path: string) {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${API_ROOT}${normalizedPath}`;
+}
+
+const API_ROOT = normalizeApiRoot(import.meta.env.VITE_API_BASE_URL);
 const RAW_SSE_PATH_TEMPLATE =
   import.meta.env.VITE_CONVERSATION_SSE_PATH_TEMPLATE ??
   "/conversations/:id/events";
@@ -106,7 +121,7 @@ async function request<T>(
   options: RequestOptions = {},
   config: RequestConfig = {},
 ): Promise<T> {
-  const response = await fetch(`${API_ROOT}${path}`, {
+  const response = await fetch(joinApiPath(path), {
     ...options,
     credentials: "include",
     headers: {
@@ -150,7 +165,7 @@ async function request<T>(
 }
 
 async function requestForm<T>(path: string, formData: FormData): Promise<T> {
-  const response = await fetch(`${API_ROOT}${path}`, {
+  const response = await fetch(joinApiPath(path), {
     method: "POST",
     credentials: "include",
     body: formData,
@@ -596,7 +611,7 @@ export const apiClient = {
     const normalizedPath = RAW_SSE_PATH_TEMPLATE.startsWith("/")
       ? RAW_SSE_PATH_TEMPLATE
       : `/${RAW_SSE_PATH_TEMPLATE}`;
-    return `${API_ROOT}${normalizedPath.replace(":id", encodeURIComponent(id))}`;
+    return joinApiPath(normalizedPath.replace(":id", encodeURIComponent(id)));
   },
 
   async getSession() {

@@ -393,7 +393,13 @@ export function resolveAssetUrl(url?: string) {
   }
 
   try {
-    return new URL(url, apiClient.getBaseUrl()).toString();
+    const resolved = new URL(url, apiClient.getBaseUrl());
+    const base = new URL(apiClient.getBaseUrl());
+    if (resolved.origin !== base.origin && resolved.pathname.startsWith("/api/assets/")) {
+      return new URL(`${resolved.pathname}${resolved.search}`, base).toString();
+    }
+
+    return resolved.toString();
   } catch {
     return url;
   }

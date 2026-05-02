@@ -97,4 +97,14 @@ describe("AppLoggerService", () => {
     assert.match(entry?.trace ?? "", /token=\[redacted\]/);
     assert.match(entry?.trace ?? "", /secret: \[redacted\]/);
   });
+
+  it("does not crash when Nest passes an undefined trace placeholder", () => {
+    const logger = AppLoggerService.createForTest(10);
+
+    logger.error("Conversation event publisher failed", undefined, "ConversationEventsService");
+
+    const entry = logger.queryLogs({ level: "error", limit: 1 }).logs[0];
+    assert.equal(entry?.message, "Conversation event publisher failed");
+    assert.equal(entry?.context, "ConversationEventsService");
+  });
 });

@@ -7,6 +7,8 @@ const elements = {
   dockerDaemon: document.querySelector("#docker-daemon"),
   dockerActionText: document.querySelector("#docker-action-text"),
   dockerAction: document.querySelector("#docker-action"),
+  instanceId: document.querySelector("#instance-id"),
+  composeProject: document.querySelector("#compose-project"),
   webUrl: document.querySelector("#web-url"),
   userData: document.querySelector("#user-data"),
   logs: document.querySelector("#logs"),
@@ -35,6 +37,8 @@ function render(status) {
   elements.dockerCli.textContent = status.dockerCli;
   elements.dockerDaemon.textContent = status.dockerDaemon;
   elements.dockerActionText.textContent = status.dockerAction === "none" ? "-" : status.dockerAction;
+  elements.instanceId.textContent = status.instanceId || "-";
+  elements.composeProject.textContent = status.composeProjectName || "-";
   elements.webUrl.textContent = status.webUrl;
   elements.userData.textContent = status.userDataPath || "-";
   elements.phase.textContent = status.phase;

@@ -165,6 +165,9 @@ export class AppLoggerService implements LoggerService {
   }
 
   private stringify(value: unknown): string {
+    if (value === undefined || value === null) {
+      return "";
+    }
     if (value instanceof Error) {
       return value.stack ?? value.message;
     }

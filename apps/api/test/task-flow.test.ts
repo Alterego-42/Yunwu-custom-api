@@ -866,6 +866,89 @@ test("createTask lazily creates a conversation and queues the task", async () =>
   assert.deepEqual(calls.enqueued, [{ taskId: "task-lazy", source: undefined }]);
 });
 
+test("createTask rejects another user's conversationId and assetIds", async () => {
+  const user = buildUser({ id: "user-a" });
+  const otherConversation = buildConversation({
+    id: "conv-b",
+    userId: "user-b",
+  });
+  const otherAsset = buildAsset({
+    id: "asset-b",
+    userId: "user-b",
+    type: "upload",
+  });
+
+  const { service, calls } = createHarness({
+    conversation: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) =>
+        where.id === otherConversation.id && where.userId === otherConversation.userId
+          ? otherConversation
+          : null,
+    },
+    asset: {
+      findMany: async (args: Record<string, any>) => {
+        calls.assetFindMany.push(args);
+        const ids = args.where?.id?.in ?? [];
+        return ids.includes(otherAsset.id) &&
+          args.where?.userId === otherAsset.userId
+          ? [otherAsset]
+          : [];
+      },
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        conversationId: otherConversation.id,
+        capability: "image.generate",
+        model: "gpt-image-2",
+        prompt: "Attempt cross-user conversation",
+      }),
+    /Conversation not found/,
+  );
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        capability: "image.generate",
+        model: "gpt-image-2",
+        prompt: "Attempt cross-user asset",
+        assetIds: [otherAsset.id],
+      }),
+    /One or more assetIds are invalid/,
+  );
+});
+
+test("createTask rejects another user's sourceTaskId", async () => {
+  const user = buildUser({ id: "user-a" });
+  const otherTask = buildTask({
+    id: "task-b",
+    userId: "user-b",
+    conversationId: "conv-b",
+  });
+  const { service } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) =>
+        where.id === otherTask.id && where.userId === otherTask.userId
+          ? otherTask
+          : null,
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        capability: "image.generate",
+        model: "gpt-image-2",
+        prompt: "Attempt cross-user source task",
+        sourceTaskId: otherTask.id,
+        sourceAction: "variant",
+      }),
+    /Source task not found/,
+  );
+});
+
 test("createTask forks into a new conversation and preserves source chain", async () => {
   const user = buildUser();
   const sourceConversation = buildConversation({ id: "conv-root", title: "Root conversation" });
@@ -1002,9 +1085,9 @@ test("retryTask retries failed tasks and writes retry source chain", async () =>
       buildTaskEvent({
         taskId: "task-failed",
         details: {
-          category: "provider_network",
+          category: "provider_unreachable",
           retryable: true,
-          title: "Provider connection failed",
+          title: "Provider unreachable",
           detail: "The service could not reach the provider.",
         },
       }),
@@ -1128,9 +1211,9 @@ test("retryTask retries failed tasks even when failure details are non-retryable
       buildTaskEvent({
         taskId: "task-invalid",
         details: {
-          category: "invalid_request",
+          category: "provider_invalid_request",
           retryable: false,
-          title: "Image request rejected",
+          title: "Provider invalid request",
           detail: "Prompt violates content policy.",
         },
       }),
@@ -1286,6 +1369,196 @@ test("archiveConversation and deleteConversation only mutate owned conversations
   assert.equal(updatedStatus, "deleted");
 });
 
+test("deleteLibraryAsset only mutates owned generated assets", async () => {
+  const owner = buildUser({ id: "owner" });
+  const outsider = buildUser({ id: "outsider" });
+  const asset = buildAsset({
+    id: "asset-owned",
+    userId: owner.id,
+    type: "generated",
+  });
+  const { service, calls } = createHarness({
+    asset: {
+      findFirst: async ({ where }: { where: { id?: string; userId?: string; type?: string } }) =>
+        where.id === asset.id && where.userId === owner.id && where.type === "generated"
+          ? asset
+          : null,
+    },
+  });
+
+  await assert.rejects(
+    () => service.deleteLibraryAsset(outsider as any, asset.id),
+    /Library asset not found/,
+  );
+
+  const response = await service.deleteLibraryAsset(owner as any, asset.id);
+
+  assert.equal(response.asset.id, asset.id);
+  assert.deepEqual(calls.assetUpdate[0]?.where, { id: asset.id });
+  assert.equal((calls.assetUpdate[0]?.data as any)?.status, "deleted");
+});
+
+test("conversation, task, history, home, and library stay isolated by user while admin can inspect globally", async () => {
+  const owner = buildUser({ id: "user-a", email: "a@example.com" });
+  const outsider = buildUser({ id: "user-b", email: "b@example.com" });
+  const admin = buildUser({ id: "admin-1", role: "admin", email: "admin@example.com" });
+  const ownerConversation = buildConversation({
+    id: "conv-a",
+    userId: owner.id,
+  });
+  const ownerAsset = buildAsset({
+    id: "asset-a",
+    userId: owner.id,
+    taskId: "task-a",
+    type: "generated",
+  });
+  const ownerTask = buildTask({
+    id: "task-a",
+    userId: owner.id,
+    conversationId: ownerConversation.id,
+    conversation: ownerConversation,
+    status: "succeeded",
+    output: { assetIds: ["asset-a"] },
+    assets: [ownerAsset],
+  });
+  const ownerConversationDetail = {
+    ...ownerConversation,
+    messages: [],
+    tasks: [ownerTask],
+  };
+
+  const { service, calls } = createHarness({
+    conversation: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        if (where.id !== ownerConversation.id) {
+          return null;
+        }
+        if (where.userId && where.userId !== owner.id) {
+          return null;
+        }
+        return ownerConversationDetail;
+      },
+      findMany: async (args: Record<string, unknown>) => {
+        if ((args.where as Record<string, unknown> | undefined)?.userId === outsider.id) {
+          return [];
+        }
+        return [ownerConversation];
+      },
+    },
+    task: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        if (where.id !== ownerTask.id) {
+          return null;
+        }
+        if (where.userId && where.userId !== owner.id) {
+          return null;
+        }
+        return ownerTask;
+      },
+      findMany: async (args: Record<string, unknown>) => {
+        calls.taskFindMany.push(args);
+        if ((args.where as Record<string, unknown> | undefined)?.userId === outsider.id) {
+          return [];
+        }
+        return [ownerTask];
+      },
+    },
+    asset: {
+      findMany: async (args: Record<string, any>) => {
+        calls.assetFindMany.push(args);
+        const userId = args.where?.userId ?? args.where?.task?.is?.userId;
+        if (userId === outsider.id) {
+          return [];
+        }
+        return args.include?.task ? [{ ...ownerAsset, task: ownerTask }] : [ownerAsset];
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => service.getConversation(outsider as any, ownerConversation.id),
+    /Conversation not found/,
+  );
+  await assert.rejects(
+    () => service.getTask(outsider as any, ownerTask.id),
+    /Task not found/,
+  );
+  assert.deepEqual((await service.getHistory(outsider as any)).items, []);
+  assert.deepEqual((await service.getHome(outsider as any)).recentTasks, []);
+  assert.deepEqual((await service.getLibrary(outsider as any)).items, []);
+
+  assert.equal((await service.getConversation(admin as any, ownerConversation.id)).conversation.id, ownerConversation.id);
+  assert.equal((await service.getTask(admin as any, ownerTask.id)).task.id, ownerTask.id);
+  assert.equal((await service.getTasks(admin as any)).tasks[0]?.id, ownerTask.id);
+  assert.equal((await service.getHistory(admin as any)).items[0]?.id, ownerTask.id);
+  assert.equal((await service.getHome(admin as any)).recentTasks[0]?.id, ownerTask.id);
+  assert.equal((await service.getLibrary(admin as any)).items[0]?.asset.id, ownerAsset.id);
+});
+
+test("conversation detail does not backfill another user's referenced input assets", async () => {
+  const owner = buildUser({ id: "user-a" });
+  const admin = buildUser({ id: "admin-1", role: "admin" });
+  const conversation = buildConversation({ id: "conv-a", userId: owner.id });
+  const foreignAsset = buildAsset({
+    id: "asset-b",
+    userId: "user-b",
+    type: "upload",
+  });
+  const task = buildTask({
+    id: "task-a",
+    userId: owner.id,
+    conversationId: conversation.id,
+    input: {
+      model: "gpt-image-2",
+      prompt: "Use a referenced asset",
+      assetIds: [foreignAsset.id],
+      params: {},
+    },
+    assets: [],
+  });
+  const conversationDetail = {
+    ...conversation,
+    messages: [],
+    tasks: [task],
+  };
+  const { service, calls } = createHarness({
+    conversation: {
+      findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+        if (where.id !== conversation.id) {
+          return null;
+        }
+        if (where.userId && where.userId !== owner.id) {
+          return null;
+        }
+        return conversationDetail;
+      },
+    },
+    asset: {
+      findMany: async (args: Record<string, any>) => {
+        calls.assetFindMany.push(args);
+        const ids = args.where?.id?.in ?? [];
+        if (!ids.includes(foreignAsset.id)) {
+          return [];
+        }
+        return args.where?.userId === owner.id ? [] : [foreignAsset];
+      },
+    },
+  });
+
+  const ownerResponse = await service.getConversation(owner as any, conversation.id);
+  const adminResponse = await service.getConversation(admin as any, conversation.id);
+
+  assert.deepEqual(ownerResponse.conversation.assets.map((asset) => asset.id), []);
+  assert.deepEqual(adminResponse.conversation.assets.map((asset) => asset.id), [foreignAsset.id]);
+  assert.deepEqual(calls.assetFindMany[0]?.where, {
+    id: { in: [foreignAsset.id] },
+    userId: owner.id,
+  });
+  assert.deepEqual(calls.assetFindMany[1]?.where, {
+    id: { in: [foreignAsset.id] },
+  });
+});
+
 test("getTask exposes refill fields and structured failure details", async () => {
   const user = buildUser();
   const conversation = buildConversation({ id: "conv-detail" });
@@ -1306,9 +1579,9 @@ test("getTask exposes refill fields and structured failure details", async () =>
       buildTaskEvent({
         taskId: "task-detail",
         details: {
-          category: "invalid_request",
+          category: "provider_invalid_request",
           retryable: false,
-          title: "Image request rejected",
+          title: "Provider invalid request",
           detail: "Mask area is empty.",
           statusCode: 400,
         },
@@ -1334,9 +1607,9 @@ test("getTask exposes refill fields and structured failure details", async () =>
   assert.equal(response.task.sourceTaskId, "task-prev");
   assert.equal(response.task.sourceAction, "variant");
   assert.deepEqual(response.task.failure, {
-    category: "invalid_request",
+    category: "provider_invalid_request",
     retryable: false,
-    title: "Image request rejected",
+    title: "Provider invalid request",
     detail: "Mask area is empty.",
     statusCode: 400,
   });
@@ -1402,9 +1675,9 @@ test("home/library exclude deleted assets while history still preserves deleted 
       buildTaskEvent({
         taskId: "task-recovery",
         details: {
-          category: "provider_unavailable",
+          category: "provider_server_error",
           retryable: true,
-          title: "Provider unavailable",
+          title: "Provider server error",
           detail: "Temporary upstream outage.",
         },
       }),

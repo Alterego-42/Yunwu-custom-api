@@ -1,9 +1,8 @@
-name: yunwu-local
+name: ${COMPOSE_PROJECT_NAME:-yunwu-local}
 
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: yunwu-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-yunwu_platform}
@@ -24,7 +23,6 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: yunwu-redis
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -43,7 +41,6 @@ services:
 
   minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1
-    container_name: yunwu-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -67,7 +64,6 @@ services:
 
   minio-init:
     image: minio/mc:RELEASE.2025-07-16T15-35-03Z
-    container_name: yunwu-minio-init
     depends_on:
       minio:
         condition: service_healthy

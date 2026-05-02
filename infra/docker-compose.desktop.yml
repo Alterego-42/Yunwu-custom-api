@@ -1,21 +1,21 @@
-name: yunwu-desktop
+name: ${COMPOSE_PROJECT_NAME:-yunwu-desktop}
 
 services:
   postgres:
-    container_name: yunwu-desktop-postgres
+    ports: !reset []
 
   redis:
-    container_name: yunwu-desktop-redis
+    ports: !reset []
 
   minio:
-    container_name: yunwu-desktop-minio
+    ports: !reset []
 
   minio-init:
-    container_name: yunwu-desktop-minio-init
+    labels:
+      ai.yunwu.desktop.runtime: "true"
 
   api:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.4.0}
-    container_name: yunwu-desktop-api
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.4.1}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -46,7 +46,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-yunwu-assets}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
-      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL:-http://127.0.0.1:${MINIO_PORT:-9000}/${MINIO_BUCKET:-yunwu-assets}}
+      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL}
       YUNWU_BASE_URL: ${YUNWU_BASE_URL:-https://yunwu.ai}
       YUNWU_API_KEY: ${YUNWU_API_KEY:-}
       AUTH_ADMIN_EMAIL: ${AUTH_ADMIN_EMAIL:-admin@yunwu.local}
@@ -75,8 +75,7 @@ services:
       start_period: 45s
 
   worker:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-worker:${YUNWU_IMAGE_TAG:-v0.4.0}
-    container_name: yunwu-desktop-worker
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-worker:${YUNWU_IMAGE_TAG:-v0.4.1}
     restart: unless-stopped
     depends_on:
       api:
@@ -96,7 +95,7 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-yunwu-assets}
       MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
-      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL:-http://127.0.0.1:${MINIO_PORT:-9000}/${MINIO_BUCKET:-yunwu-assets}}
+      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL}
       YUNWU_BASE_URL: ${YUNWU_BASE_URL:-https://yunwu.ai}
       YUNWU_API_KEY: ${YUNWU_API_KEY:-}
     healthcheck:
@@ -110,8 +109,7 @@ services:
       start_period: 30s
 
   web:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-web:${YUNWU_IMAGE_TAG:-v0.4.0}
-    container_name: yunwu-desktop-web
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-web:${YUNWU_IMAGE_TAG:-v0.4.1}
     restart: unless-stopped
     depends_on:
       api:

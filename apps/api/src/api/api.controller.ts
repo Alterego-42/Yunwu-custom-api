@@ -239,7 +239,11 @@ export class ApiController {
 
     response.setHeader("Content-Type", asset.mimeType);
     response.setHeader("Cache-Control", "public, max-age=31536000, immutable");
-    return new StreamableFile(createReadStream(asset.filePath));
+    if (asset.kind === "local") {
+      return new StreamableFile(createReadStream(asset.filePath));
+    }
+
+    return new StreamableFile(asset.buffer);
   }
 
   @Get("tasks")

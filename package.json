@@ -1,6 +1,6 @@
 {
   "name": "yunwu-custom-api",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "scripts": {
@@ -12,6 +12,7 @@
     "local:start": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/start-local.ps1 -Mode Windows",
     "local:start:manual": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/start-local.ps1 -Mode Manual",
     "local:stop": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/stop-local.ps1",
+    "local:reset": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/stop-local.ps1 -ResetVolumes",
     "local:test": "pnpm local:test:auth && pnpm local:test:routes",
     "local:test:auth": "pnpm --filter @yunwu/api test:auth",
     "local:test:routes": "pnpm --filter @yunwu/web test:routes",
@@ -23,14 +24,16 @@
     "desktop:build": "pnpm --filter @yunwu/desktop build",
     "desktop:typecheck": "pnpm --filter @yunwu/desktop typecheck",
     "desktop:package": "pnpm --filter @yunwu/desktop package",
-    "docker:infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d",
-    "docker:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
-    "docker:up": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build",
-    "docker:down": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml down",
-    "docker:config": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml config",
-    "docker:ps": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml ps",
-    "docker:logs": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml logs --tail=200",
-    "docker:migrate": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml run --rm api ./apps/api/node_modules/.bin/prisma migrate deploy --schema apps/api/prisma/schema.prisma"
+    "docker:infra:up": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action infra:up",
+    "docker:infra:down": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action infra:down",
+    "docker:up": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action up -Build",
+    "docker:down": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action down",
+    "docker:reset": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action reset",
+    "docker:config": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action config",
+    "docker:ps": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action ps",
+    "docker:logs": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action logs",
+    "docker:migrate": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action migrate",
+    "docker:verify-instance": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/verify-instance-compose.ps1 -App"
   },
   "pnpm": {
     "overrides": {

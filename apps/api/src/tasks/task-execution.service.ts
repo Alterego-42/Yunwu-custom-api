@@ -1,5 +1,7 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { Prisma, type Asset, type TaskStatus } from "@prisma/client";
+import { randomUUID } from "node:crypto";
+import { AssetStorageService } from "../api/storage/asset-storage.service";
 import { ConversationEventsService } from "../api/conversation-events.service";
 import {
   OpenAICompatibleRequestError,
@@ -20,6 +22,16 @@ interface TaskInputShape {
   providerBaseUrl?: string;
 }
 
+interface GeneratedOutputLocation {
+  storageKey?: string;
+  url: string;
+  storage: {
+    kind: "local" | "s3" | "remote-url";
+    objectUrl?: string;
+    downloadError?: string;
+  };
+}
+
 @Injectable()
 export class TaskExecutionService {
   private readonly logger = new Logger(TaskExecutionService.name);
@@ -31,6 +43,7 @@ export class TaskExecutionService {
     private readonly providerAlerts: ProviderAlertsService,
     private readonly conversationEvents: ConversationEventsService,
     private readonly taskEvents: TaskEventsService,
+    private readonly assetStorage: AssetStorageService,
   ) {}
 
   async execute(taskId: string) {
@@ -138,13 +151,15 @@ export class TaskExecutionService {
         details: result.responseSummary,
       });
 
+      const storedOutput = await this.storeGeneratedOutput(task.id, result);
       const asset = await this.prisma.asset.create({
         data: {
           userId: task.userId,
           taskId: task.id,
           type: "generated",
           mimeType: result.mimeType,
-          url: result.url,
+          storageKey: storedOutput.storageKey,
+          url: storedOutput.url,
           status: "ready",
           metadata: {
             width: result.width,
@@ -152,6 +167,10 @@ export class TaskExecutionService {
             mocked: result.mocked,
             provider: "openai-compatible",
             responseSummary: result.responseSummary,
+            storage: storedOutput.storage.kind,
+            ...(storedOutput.storage.objectUrl
+              ? { objectUrl: storedOutput.storage.objectUrl }
+              : {}),
           } as Prisma.InputJsonObject,
         },
       });
@@ -225,6 +244,8 @@ export class TaskExecutionService {
           category: failure.category,
           retryable: failure.retryable,
           statusCode: failure.statusCode,
+          errorStage: failure.errorStage,
+          errorKind: failure.errorKind,
         },
       });
 
@@ -273,6 +294,84 @@ export class TaskExecutionService {
     return value === "image.edit" ? "image.edit" : "image.generate";
   }
 
+  private async storeGeneratedOutput(
+    taskId: string,
+    result: {
+      url: string;
+      mimeType?: string;
+    },
+  ): Promise<GeneratedOutputLocation> {
+    const mimeType = result.mimeType ?? this.mimeTypeFromDataUrl(result.url) ?? "image/png";
+    const storageKey = `${Date.now()}-${taskId}-${randomUUID()}.${this.extensionFromMimeType(
+      mimeType,
+    )}`;
+
+    try {
+      const buffer = await this.readImageResultBuffer(result.url);
+      const storage = await this.assetStorage.store({
+        buffer,
+        storageKey,
+        mimeType,
+      });
+
+      return {
+        storageKey,
+        storage,
+        url: this.assetStorage.getPublicUrl(storageKey, storage),
+      };
+    } catch (error) {
+      if (!this.isRemoteImageUrl(result.url)) {
+        throw error;
+      }
+
+      return {
+        url: result.url,
+        storage: {
+          kind: "remote-url",
+          downloadError: this.sanitizeDisplayText(
+            error instanceof Error ? error.message : String(error),
+            240,
+          ),
+        },
+      };
+    }
+  }
+
+  private isRemoteImageUrl(value: string) {
+    return /^https?:\/\//i.test(value);
+  }
+
+  private async readImageResultBuffer(url: string) {
+    const dataUrl = url.match(/^data:([^;,]+)?;base64,(.+)$/is);
+    if (dataUrl) {
+      return Buffer.from(dataUrl[2], "base64");
+    }
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Generated image download failed with status ${response.status}.`);
+    }
+
+    return Buffer.from(await response.arrayBuffer());
+  }
+
+  private mimeTypeFromDataUrl(url: string) {
+    return url.match(/^data:([^;,]+)?;base64,/i)?.[1];
+  }
+
+  private extensionFromMimeType(mimeType: string) {
+    switch (mimeType) {
+      case "image/jpeg":
+        return "jpg";
+      case "image/webp":
+        return "webp";
+      case "image/gif":
+        return "gif";
+      default:
+        return "png";
+    }
+  }
+
   private isTerminalStatus(status: TaskStatus) {
     return ["succeeded", "failed", "cancelled", "expired"].includes(status);
   }
@@ -316,6 +415,10 @@ export class TaskExecutionService {
     capability: SupportedTaskCapability,
     model?: string,
   ) {
+    if (capability === "image.generate" && model?.startsWith("gemini-")) {
+      return `/v1beta/models/${model}:generateContent`;
+    }
+
     if (capability === "image.edit" && model?.startsWith("gemini-")) {
       return "/v1/chat/completions";
     }
@@ -372,6 +475,8 @@ export class TaskExecutionService {
     category: string;
     retryable: boolean;
     statusCode?: number;
+    errorStage?: string;
+    errorKind?: string;
   } {
     const rawMessage =
       error instanceof Error ? error.message : "Image task failed.";
@@ -380,11 +485,113 @@ export class TaskExecutionService {
 
     if (error instanceof OpenAICompatibleRequestError) {
       const statusCode = this.asNumber(error.responseSummary.statusCode);
+      const errorStage = this.asString(error.responseSummary.stage);
+      const errorKind = this.asString(error.responseSummary.errorKind);
       const upstreamMessage =
         this.sanitizeDisplayText(
           this.asString(error.responseSummary.errorMessage) ?? rawMessage,
           240,
         ) || sanitizedMessage;
+
+      if (errorStage === "request") {
+        if (errorKind === "timeout") {
+          return {
+            title: "Provider request timed out",
+            detail:
+              "The image request was sent, but the provider did not return a response before timeout.",
+            errorMessage:
+              "The image provider timed out before returning a response. Please retry later.",
+            category: "provider_timeout",
+            retryable: true,
+            errorStage,
+            errorKind,
+          };
+        }
+
+        if (errorKind === "tls") {
+          return {
+            title: "Provider unreachable",
+            detail:
+              "The service could not establish a trusted TLS connection to the image provider.",
+            errorMessage:
+              "The image provider TLS connection failed. Check the provider base URL and network environment.",
+            category: "provider_unreachable",
+            retryable: true,
+            errorStage,
+            errorKind,
+          };
+        }
+
+        if (errorKind === "connection_reset") {
+          return {
+            title: "Provider unreachable",
+            detail:
+              "The provider connection was closed before the image response was received.",
+            errorMessage:
+              "The image provider closed the connection before returning a response. Please retry later.",
+            category: "provider_unreachable",
+            retryable: true,
+            errorStage,
+            errorKind,
+          };
+        }
+
+        return {
+          title: "Provider request failed",
+          detail:
+            "The service could not complete the request to the image provider.",
+          errorMessage: upstreamMessage,
+          category: "provider_unreachable",
+          retryable: true,
+          errorStage,
+          errorKind,
+        };
+      }
+
+      if (errorStage === "response_read") {
+        return {
+          title: "Provider bad response",
+          detail:
+            "The provider responded, but the service could not finish reading the response body.",
+          errorMessage:
+            "The image provider response was interrupted before it could be read. Please retry later.",
+          category: "provider_bad_response",
+          retryable: true,
+          statusCode,
+          errorStage,
+          errorKind,
+        };
+      }
+
+      if (errorStage === "response_parse") {
+        return {
+          title: "Provider bad response",
+          detail:
+            "The provider returned a response body that was not valid JSON for this image endpoint.",
+          errorMessage:
+            "The image provider returned a response that could not be parsed. Please retry later.",
+          category: "provider_bad_response",
+          retryable: true,
+          statusCode,
+          errorStage,
+          errorKind,
+        };
+      }
+
+      if (errorStage === "response_unparseable") {
+        return {
+          title: "Provider image missing",
+          detail:
+            "The provider returned a successful response, but no image URL or base64 image payload could be found.",
+          errorMessage:
+            "The image provider returned a response without a usable image. Please retry or choose another model.",
+          category: "provider_image_missing",
+          retryable: true,
+          statusCode,
+          errorStage,
+          errorKind,
+        };
+      }
 
       if (statusCode === 401 || statusCode === 403) {
         return {
@@ -396,6 +603,8 @@ export class TaskExecutionService {
           category: "provider_auth",
           retryable: false,
           statusCode,
+          errorStage,
+          errorKind,
         };
       }
 
@@ -406,34 +615,40 @@ export class TaskExecutionService {
             "The image provider is temporarily rate limited. Please retry later.",
           errorMessage:
             "The image provider is rate limited. Please retry later.",
-          category: "rate_limited",
+          category: "provider_rate_limited",
           retryable: true,
           statusCode,
+          errorStage,
+          errorKind,
         };
       }
 
       if (statusCode && statusCode >= 500) {
         return {
-          title: "Provider unavailable",
+          title: "Provider server error",
           detail:
             "The image provider returned a temporary server error. Please retry later.",
           errorMessage:
             "The image provider is temporarily unavailable. Please retry later.",
-          category: "provider_unavailable",
+          category: "provider_server_error",
           retryable: true,
           statusCode,
+          errorStage,
+          errorKind,
         };
       }
 
       if (statusCode && statusCode >= 400) {
         return {
-          title: "Image request rejected",
+          title: "Provider invalid request",
           detail:
             "The image provider rejected the request. Check the prompt, model, and input images before retrying.",
           errorMessage: upstreamMessage,
-          category: "invalid_request",
+          category: "provider_invalid_request",
           retryable: false,
           statusCode,
+          errorStage,
+          errorKind,
         };
       }
     }
@@ -444,12 +659,12 @@ export class TaskExecutionService {
       )
     ) {
       return {
-        title: "Provider connection failed",
+        title: "Provider unreachable",
         detail:
           "The service could not reach the image provider. Please retry later.",
         errorMessage:
           "The service could not reach the image provider. Please retry later.",
-        category: "provider_network",
+        category: "provider_unreachable",
         retryable: true,
       };
     }

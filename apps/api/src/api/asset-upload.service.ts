@@ -112,7 +112,10 @@ export class AssetUploadService {
     }
 
     const asset = await this.prisma.asset.findFirst({
-      where: { storageKey },
+      where:
+        user.role === "admin"
+          ? { storageKey }
+          : { storageKey, userId: user.id },
       select: { storageKey: true, metadata: true, userId: true },
       orderBy: { createdAt: "desc" },
     });

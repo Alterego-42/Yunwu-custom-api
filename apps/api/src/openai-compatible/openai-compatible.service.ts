@@ -69,6 +69,32 @@ interface ExtractedImageResult {
   mimeType?: string;
 }
 
+type OpenAICompatibleRequestStage =
+  | "request"
+  | "response_read"
+  | "response_parse"
+  | "response_status"
+  | "response_unparseable";
+
+type OpenAICompatibleRequestErrorKind =
+  | "timeout"
+  | "network"
+  | "connection_reset"
+  | "tls"
+  | "unknown";
+
+interface OpenAICompatibleRequestSummary extends Record<string, unknown> {
+  stage?: OpenAICompatibleRequestStage;
+  errorKind?: OpenAICompatibleRequestErrorKind;
+  contentType?: string;
+  bodyPreview?: string;
+  bodyLength?: number;
+  responseParseError?: boolean;
+  fetchErrorName?: string;
+  fetchCauseCode?: string;
+  fetchCauseMessage?: string;
+}
+
 const RESERVED_IMAGE_REQUEST_PARAM_KEYS = new Set([
   "model",
   "prompt",
@@ -89,7 +115,7 @@ export const PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE =
 export class OpenAICompatibleRequestError extends Error {
   constructor(
     message: string,
-    readonly responseSummary: Record<string, unknown>,
+    readonly responseSummary: OpenAICompatibleRequestSummary,
   ) {
     super(message);
     this.name = "OpenAICompatibleRequestError";
@@ -174,48 +200,39 @@ export class OpenAICompatibleService {
     }
 
     const baseUrl = await this.getResolvedBaseUrl(request.baseUrl);
-    const usesGeminiImageEdit = this.isGeminiImageEditRequest(request);
     const endpointPath = this.resolveImageEndpointPath(request);
     const endpoint = `${baseUrl}${endpointPath}`;
 
-    const response =
-      usesGeminiImageEdit
-        ? await this.submitGeminiImageEditRequest(endpoint, apiKey, request)
-        : request.capability === "image.edit"
-        ? await this.submitImageEditRequest(endpoint, apiKey, request)
-        : await fetch(endpoint, {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${apiKey}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              ...this.sanitizeImageRequestParams(request.params),
-              model: request.model,
-              prompt: request.prompt,
-            }),
-          });
-
-    const payload = (await response.json().catch(() => ({}))) as Record<
-      string,
-      unknown
-    >;
+    const response = await this.sendImageRequest(endpoint, apiKey, request);
+    const { payload, bodyText, contentType, responseParseError } =
+      await this.readResponsePayload(response, endpointPath);
     const responseSummary = this.toResponseSummary(
       "live",
       endpointPath,
       response.status,
       payload,
+      {
+        stage: "response_status",
+        ...(contentType ? { contentType } : {}),
+        ...(bodyText ? { bodyPreview: this.sanitizeDisplayText(bodyText, 240) } : {}),
+        ...(bodyText ? { bodyLength: bodyText.length } : {}),
+        ...(responseParseError ? { responseParseError } : {}),
+      },
     );
 
     if (!response.ok) {
       const error = this.asRecord(payload.error);
-      const errorMessage = this.asString(error?.message);
+      const upstreamMessage =
+        this.asString(error?.message) ??
+        this.asString(error?.detail) ??
+        this.asString(payload.message) ??
+        this.asString(payload.errorMessage);
+      const errorMessage =
+        upstreamMessage ||
+        this.sanitizeDisplayText(bodyText, 240) ||
+        `OpenAI-compatible image request failed with ${response.status}`;
 
-      throw new OpenAICompatibleRequestError(
-        errorMessage ??
-          `OpenAI-compatible image request failed with ${response.status}`,
-        responseSummary,
-      );
+      throw new OpenAICompatibleRequestError(errorMessage, responseSummary);
     }
 
     const firstImage = this.extractImageResult(payload);
@@ -224,7 +241,10 @@ export class OpenAICompatibleService {
         `OpenAI-compatible image response did not include data. Response shape: ${JSON.stringify(
           responseSummary.shapeHints,
         )}`,
-        responseSummary,
+        {
+          ...responseSummary,
+          stage: "response_unparseable",
+        },
       );
     }
 
@@ -322,6 +342,143 @@ export class OpenAICompatibleService {
         ],
       }),
     });
+  }
+
+  private async submitGeminiImageGenerateRequest(
+    endpoint: string,
+    apiKey: string,
+    request: OpenAICompatibleImageRequest,
+  ) {
+    const size = typeof request.params?.size === "string" ? request.params.size : undefined;
+    const imageConfig = this.resolveGeminiImageConfig(size, request.model);
+
+    return fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            role: "user",
+            parts: [{ text: request.prompt }],
+          },
+        ],
+        generationConfig: {
+          responseModalities: ["IMAGE"],
+          ...(imageConfig ? { imageConfig } : {}),
+        },
+      }),
+    });
+  }
+
+  private async sendImageRequest(
+    endpoint: string,
+    apiKey: string,
+    request: OpenAICompatibleImageRequest,
+  ) {
+    try {
+      if (request.model.startsWith("gemini-")) {
+        return request.capability === "image.edit"
+          ? await this.submitGeminiImageEditRequest(endpoint, apiKey, request)
+          : await this.submitGeminiImageGenerateRequest(endpoint, apiKey, request);
+      }
+
+      return request.capability === "image.edit"
+        ? await this.submitImageEditRequest(endpoint, apiKey, request)
+        : await fetch(endpoint, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              ...this.sanitizeImageRequestParams(request.params),
+              model: request.model,
+              prompt: request.prompt,
+            }),
+          });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error ?? "");
+      if (/requires at least one input asset|could not be resolved/i.test(message)) {
+        throw error;
+      }
+
+      throw new OpenAICompatibleRequestError(
+        this.asString(message) ||
+          "OpenAI-compatible image request failed before a response was received.",
+        {
+          mode: "live",
+          endpointPath: this.resolveImageEndpointPath(request),
+          stage: "request",
+          errorKind: this.classifyRequestError(error),
+          ...this.getRequestErrorDetails(error),
+          model: request.model,
+          capability: request.capability,
+        },
+      );
+    }
+  }
+
+  private async readResponsePayload(response: Response, endpointPath: string) {
+    const contentType =
+      response.headers?.get("content-type")?.split(";")[0].trim() ?? undefined;
+    const hasText = typeof response.text === "function";
+    const hasJson = typeof response.json === "function";
+    let bodyText = "";
+    if (hasText) {
+      try {
+        bodyText = await response.text();
+      } catch (error) {
+        throw new OpenAICompatibleRequestError(
+          "OpenAI-compatible image response body could not be read.",
+          {
+            mode: "live",
+            endpointPath,
+            statusCode: response.status,
+            stage: "response_read",
+            errorKind: this.classifyRequestError(error),
+            ...(contentType ? { contentType } : {}),
+          },
+        );
+      }
+    }
+    let payload: Record<string, unknown> = {};
+    let responseParseError = false;
+
+    if (bodyText.trim()) {
+      try {
+        payload = JSON.parse(bodyText) as Record<string, unknown>;
+      } catch (error) {
+        if (!response.ok) {
+          responseParseError = true;
+        } else {
+          throw new OpenAICompatibleRequestError(
+            "OpenAI-compatible image response could not be parsed as JSON.",
+            {
+              mode: "live",
+              endpointPath,
+              statusCode: response.status,
+              stage: "response_parse",
+              errorKind: "unknown",
+              contentType,
+              bodyPreview: this.sanitizeDisplayText(bodyText, 240),
+              bodyLength: bodyText.length,
+            },
+          );
+        }
+      }
+    } else if (hasJson) {
+      payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    }
+
+    return {
+      payload,
+      bodyText,
+      contentType,
+      responseParseError,
+    };
   }
 
   private async probeBaseUrl(baseUrl: string): Promise<{
@@ -428,6 +585,7 @@ export class OpenAICompatibleService {
     endpointPath: string,
     statusCode: number,
     payload: Record<string, unknown>,
+    extras: Partial<OpenAICompatibleRequestSummary> = {},
   ) {
     const data = this.asRecordArray(payload.data);
     const firstImage = this.extractImageResult(payload);
@@ -437,6 +595,7 @@ export class OpenAICompatibleService {
       mode,
       endpointPath,
       statusCode,
+      ...extras,
       resultCount: data?.length ?? (firstImage ? 1 : 0),
       hasUrl: Boolean(firstImage?.url),
       hasBase64: Boolean(firstImage?.b64_json),
@@ -676,6 +835,65 @@ export class OpenAICompatibleService {
     };
   }
 
+  private classifyRequestError(error: unknown): OpenAICompatibleRequestErrorKind {
+    const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+    const cause = error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
+    const causeText =
+      cause instanceof Error
+        ? `${cause.name}: ${cause.message}`
+        : typeof cause === "object" && cause
+          ? JSON.stringify(cause)
+          : String(cause ?? "");
+    const haystack = `${error instanceof Error ? error.name : ""} ${rawMessage} ${causeText}`;
+
+    if (/abort|timeout|timed out/i.test(haystack)) {
+      return "timeout";
+    }
+    if (/tls|certificate|self signed|CERT_/i.test(haystack)) {
+      return "tls";
+    }
+    if (/ECONNRESET|socket hang up|undici|connection reset/i.test(haystack)) {
+      return "connection_reset";
+    }
+    if (/fetch failed|ENOTFOUND|EAI_AGAIN|network/i.test(haystack)) {
+      return "network";
+    }
+
+    return "unknown";
+  }
+
+  private getRequestErrorDetails(error: unknown) {
+    const base =
+      error instanceof Error ? { fetchErrorName: error.name } : {};
+    const cause =
+      error instanceof Error ? (error as Error & { cause?: unknown }).cause : undefined;
+    if (!cause) {
+      return base;
+    }
+
+    if (cause instanceof Error) {
+      const code = this.asString((cause as Error & { code?: unknown }).code);
+      return {
+        ...base,
+        ...(code ? { fetchCauseCode: code } : {}),
+        fetchCauseMessage: this.sanitizeDisplayText(cause.message, 240),
+      };
+    }
+
+    if (typeof cause === "object") {
+      const record = this.asRecord(cause);
+      const code = this.asString(record?.code);
+      const message = this.asString(record?.message);
+      return {
+        ...base,
+        ...(code ? { fetchCauseCode: code } : {}),
+        ...(message ? { fetchCauseMessage: this.sanitizeDisplayText(message, 240) } : {}),
+      };
+    }
+
+    return base;
+  }
+
   private async fetchS3Object(storageKey: string, fileName: string) {
     const s3 = this.getS3Config();
     if (!this.isS3Configured(s3)) {
@@ -853,6 +1071,36 @@ export class OpenAICompatibleService {
     return Number(key === "width" ? match[1] : match[2]);
   }
 
+  private resolveGeminiImageConfig(size: string | undefined, model: string) {
+    const aspectRatio = this.resolveGeminiAspectRatio(size);
+    if (!aspectRatio) {
+      return undefined;
+    }
+
+    return {
+      aspectRatio,
+      ...(model.startsWith("gemini-3") ? { imageSize: "1K" } : {}),
+    };
+  }
+
+  private resolveGeminiAspectRatio(size: string | undefined) {
+    const normalized = size?.trim().toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+    if (normalized === "1024x1024" || normalized === "1:1") {
+      return "1:1";
+    }
+    if (normalized === "1536x1024" || normalized === "3:2") {
+      return "3:2";
+    }
+    if (normalized === "1024x1536" || normalized === "2:3") {
+      return "2:3";
+    }
+
+    return undefined;
+  }
+
   private extensionFromMimeType(mimeType?: string | null) {
     switch (mimeType) {
       case "image/jpeg":
@@ -890,6 +1138,10 @@ export class OpenAICompatibleService {
   }
 
   private resolveImageEndpointPath(request: OpenAICompatibleImageRequest) {
+    if (request.capability === "image.generate" && request.model.startsWith("gemini-")) {
+      return `/v1beta/models/${request.model}:generateContent`;
+    }
+
     if (this.isGeminiImageEditRequest(request)) {
       return "/v1/chat/completions";
     }
@@ -988,7 +1240,7 @@ export class OpenAICompatibleService {
       };
     }
 
-    for (const key of ["data", "images", "content", "output", "parts"]) {
+    for (const key of ["data", "images", "candidates", "content", "output", "parts"]) {
       const image = this.extractImageFromArray(record[key]);
       if (image) {
         return image;

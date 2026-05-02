@@ -12,6 +12,7 @@ import {
   toImageResults,
   toUiTask,
 } from "@/lib/api-mappers";
+import { apiClient } from "@/lib/api-client";
 import type { AssetRecord, ModelRecord, TaskRecord } from "@/lib/api-types";
 
 function createTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
@@ -158,6 +159,13 @@ describe("api mappers", () => {
     expect(new URL(resolvedFromLiteral ?? "").pathname).toBe(
       "/api/assets/asset_1/content",
     );
+  });
+
+  it("normalizes absolute localhost asset urls to the api origin", () => {
+    const resolved = resolveAssetUrl("http://localhost:3000/api/assets/asset_1/content");
+
+    expect(new URL(resolved ?? "").pathname).toBe("/api/assets/asset_1/content");
+    expect(new URL(resolved ?? "").origin).toBe(new URL(apiClient.getBaseUrl()).origin);
   });
 
   it("does not expose generated assets on failed tasks", () => {

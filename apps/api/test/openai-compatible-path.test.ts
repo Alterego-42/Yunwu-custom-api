@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  OpenAICompatibleRequestError,
   OpenAICompatibleService,
   PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE,
 } from "../src/openai-compatible/openai-compatible.service";
@@ -245,6 +246,408 @@ test("createImageTask posts image generation body with task prompt and model", a
     });
     assert.equal(result.width, 1280);
     assert.equal(result.height, 720);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask preserves Grok remote image urls", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          created: 1777720432,
+          data: [{ url: "https://provider.example/grok-output.jpg" }],
+        }),
+    }) as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    const result = await service.createImageTask({
+      capability: "image.generate",
+      model: "grok-4.2-image",
+      prompt: "draw a blue triangle",
+      baseUrl: "https://api3.wlai.vip",
+      params: { size: "1024x1024" },
+    });
+
+    assert.equal(result.url, "https://provider.example/grok-output.jpg");
+    assert.equal(result.responseSummary.hasUrl, true);
+    assert.equal(result.responseSummary.endpointPath, "/v1/images/generations");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("resolveImageEndpointPath keeps supported model families on documented routes", () => {
+  const service = new OpenAICompatibleService(
+    createConfig("./storage") as never,
+    createProviderConfig() as never,
+  );
+
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.generate",
+      model: "gpt-image-2",
+      prompt: "test",
+    }),
+    "/v1/images/generations",
+  );
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.edit",
+      model: "gpt-image-2",
+      prompt: "test",
+    }),
+    "/v1/images/edits",
+  );
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.generate",
+      model: "grok-4.2-image",
+      prompt: "test",
+    }),
+    "/v1/images/generations",
+  );
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.edit",
+      model: "grok-4.2-image",
+      prompt: "test",
+    }),
+    "/v1/images/edits",
+  );
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.generate",
+      model: "gemini-3-pro-image-preview",
+      prompt: "test",
+    }),
+    "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+  );
+  assert.equal(
+    service["resolveImageEndpointPath"]({
+      capability: "image.edit",
+      model: "gemini-3-pro-image-preview",
+      prompt: "test",
+    }),
+    "/v1/chat/completions",
+  );
+});
+
+test("createImageTask posts Gemini image generation to generateContent and parses candidates", async () => {
+  const originalFetch = globalThis.fetch;
+  let requestedUrl = "";
+  let requestedBody: Record<string, unknown> | undefined;
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    requestedUrl = url;
+    requestedBody = JSON.parse(String(init?.body));
+
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  { text: "generated image" },
+                  {
+                    inlineData: {
+                      mimeType: "image/png",
+                      data: Buffer.from("png").toString("base64"),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    const result = await service.createImageTask({
+      capability: "image.generate",
+      model: "gemini-3-pro-image-preview",
+      prompt: "draw a yellow circle",
+      baseUrl: "https://api3.wlai.vip/v1/",
+      params: { size: "1024x1024" },
+    });
+
+    assert.equal(
+      requestedUrl,
+      "https://api3.wlai.vip/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    );
+    assert.deepEqual(requestedBody, {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: "draw a yellow circle" }],
+        },
+      ],
+      generationConfig: {
+        responseModalities: ["IMAGE"],
+        imageConfig: {
+          aspectRatio: "1:1",
+          imageSize: "1K",
+        },
+      },
+    });
+    assert.equal(
+      result.url,
+      `data:image/png;base64,${Buffer.from("png").toString("base64")}`,
+    );
+    assert.equal(
+      result.responseSummary.endpointPath,
+      "/v1beta/models/gemini-3-pro-image-preview:generateContent",
+    );
+    assert.equal(result.responseSummary.hasBase64, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask reports transport errors with provider request stage", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const error = new Error("fetch failed") as Error & { cause?: unknown };
+    error.cause = Object.assign(new Error("read ECONNRESET"), {
+      code: "ECONNRESET",
+    });
+    throw error;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "request");
+        assert.equal(error.responseSummary.errorKind, "connection_reset");
+        assert.equal(error.responseSummary.endpointPath, "/v1/images/generations");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask reports invalid JSON provider responses", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/plain" }),
+      text: async () => "provider returned a non-json body",
+    }) as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "response_parse");
+        assert.equal(error.responseSummary.statusCode, 200);
+        assert.equal(error.responseSummary.contentType, "text/plain");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask reports response body read failures", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () => {
+        throw new Error("socket closed while reading body");
+      },
+    }) as unknown as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "response_read");
+        assert.equal(error.responseSummary.statusCode, 200);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask keeps HTTP status errors even when body is not JSON", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: false,
+      status: 502,
+      headers: new Headers({ "content-type": "text/html" }),
+      text: async () => "<html>bad gateway from provider</html>",
+    }) as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "response_status");
+        assert.equal(error.responseSummary.statusCode, 502);
+        assert.equal(error.responseSummary.responseParseError, true);
+        assert.match(String(error.responseSummary.bodyPreview), /bad gateway/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask preserves provider HTTP error messages", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: false,
+      status: 400,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          error: { message: "model gpt-image-2 does not support this size" },
+        }),
+    }) as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.message, "model gpt-image-2 does not support this size");
+        assert.equal(error.responseSummary.stage, "response_status");
+        assert.equal(error.responseSummary.statusCode, 400);
+        assert.equal(
+          error.responseSummary.errorMessage,
+          "model gpt-image-2 does not support this size",
+        );
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask reports successful responses without image payloads", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          id: "chatcmpl-123",
+          choices: [{ message: { content: "completed without image" } }],
+        }),
+    }) as Response) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "response_unparseable");
+        assert.equal(error.responseSummary.statusCode, 200);
+        assert.ok(error.responseSummary.shapeHints);
+        return true;
+      },
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

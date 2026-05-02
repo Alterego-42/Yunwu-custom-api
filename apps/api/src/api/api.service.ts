@@ -554,10 +554,33 @@ export class ApiService implements OnModuleInit {
   }
 
   async getHome(user: AuthenticatedUser): Promise<HomeResponse> {
+    const userScopedWhere = user.role === "admin" ? {} : { userId: user.id };
+    const generatedAssetWhere =
+      user.role === "admin"
+        ? {
+            type: "generated" as const,
+            status: { not: "deleted" as const },
+            task: {
+              is: {
+                status: "succeeded" as const,
+              },
+            },
+          }
+        : {
+            userId: user.id,
+            type: "generated" as const,
+            status: { not: "deleted" as const },
+            task: {
+              is: {
+                userId: user.id,
+                status: "succeeded" as const,
+              },
+            },
+          };
     const [conversations, recentTasks, recentAssets, recoveryTasks] =
       await Promise.all([
         this.prisma.conversation.findMany({
-          where: { userId: user.id, status: "active" },
+          where: { ...userScopedWhere, status: "active" },
           include: {
             tasks: {
               orderBy: { updatedAt: "desc" },
@@ -568,7 +591,7 @@ export class ApiService implements OnModuleInit {
           take: 6,
         }),
         this.prisma.task.findMany({
-          where: { userId: user.id },
+          where: userScopedWhere,
           orderBy: { updatedAt: "desc" },
           include: {
             assets: true,
@@ -579,17 +602,7 @@ export class ApiService implements OnModuleInit {
           take: 8,
         }),
         this.prisma.asset.findMany({
-          where: {
-            userId: user.id,
-            type: "generated",
-            status: { not: "deleted" },
-            task: {
-              is: {
-                userId: user.id,
-                status: "succeeded",
-              },
-            },
-          },
+          where: generatedAssetWhere,
           include: {
             task: {
               include: {
@@ -604,7 +617,7 @@ export class ApiService implements OnModuleInit {
           take: 8,
         }),
         this.prisma.task.findMany({
-          where: { userId: user.id, status: "failed" },
+          where: { ...userScopedWhere, status: "failed" },
           orderBy: { updatedAt: "desc" },
           include: {
             assets: true,
@@ -632,7 +645,7 @@ export class ApiService implements OnModuleInit {
 
   async getHistory(user: AuthenticatedUser): Promise<HistoryResponse> {
     const tasks = await this.prisma.task.findMany({
-      where: { userId: user.id },
+      where: user.role === "admin" ? undefined : { userId: user.id },
       orderBy: { updatedAt: "desc" },
       include: {
         assets: true,
@@ -650,17 +663,28 @@ export class ApiService implements OnModuleInit {
 
   async getLibrary(user: AuthenticatedUser): Promise<LibraryResponse> {
     const assets = await this.prisma.asset.findMany({
-      where: {
-        userId: user.id,
-        type: "generated",
-        status: { not: "deleted" },
-        task: {
-          is: {
-            userId: user.id,
-            status: "succeeded",
-          },
-        },
-      },
+      where:
+        user.role === "admin"
+          ? {
+              type: "generated",
+              status: { not: "deleted" },
+              task: {
+                is: {
+                  status: "succeeded",
+                },
+              },
+            }
+          : {
+              userId: user.id,
+              type: "generated",
+              status: { not: "deleted" },
+              task: {
+                is: {
+                  userId: user.id,
+                  status: "succeeded",
+                },
+              },
+            },
       include: {
         task: {
           include: {
@@ -1685,7 +1709,10 @@ export class ApiService implements OnModuleInit {
     );
     if (missingInputAssetIds.length > 0) {
       const referencedAssets = await this.prisma.asset.findMany({
-        where: { id: { in: missingInputAssetIds } },
+        where:
+          user.role === "admin"
+            ? { id: { in: missingInputAssetIds } }
+            : { id: { in: missingInputAssetIds }, userId: user.id },
       });
       referencedAssets.forEach((asset) => assetsById.set(asset.id, asset));
     }
@@ -2030,6 +2057,8 @@ export class ApiService implements OnModuleInit {
 
         return {
           id: asset.id,
+          url: asset.url ?? "",
+          storageKey: asset.storageKey ?? undefined,
           mimeType: asset.mimeType,
           width:
             typeof metadata.width === "number" ? metadata.width : undefined,
@@ -2114,7 +2143,10 @@ export class ApiService implements OnModuleInit {
 
     if (input.conversationId) {
       const conversation = await this.prisma.conversation.findFirst({
-        where: { id: input.conversationId, userId: user.id, status: "active" },
+        where:
+          user.role === "admin"
+            ? { id: input.conversationId, status: "active" }
+            : { id: input.conversationId, userId: user.id, status: "active" },
       });
       if (!conversation) {
         throw new NotFoundException("Conversation not found.");
