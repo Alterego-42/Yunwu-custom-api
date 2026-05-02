@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Yunwu Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Yunwu Desktop v0.4.0</p>
+        <h1>正在准备本地创作工作台</h1>
+        <p id="message" class="message">准备启动本地服务。</p>
+        <div class="actions">
+          <button id="retry" type="button">重试</button>
+          <button id="workbench" type="button" class="secondary">打开工作台</button>
+          <button id="admin" type="button" class="secondary">打开管理台</button>
+          <button id="folder" type="button" class="ghost">打开运行目录</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <article class="card">
+          <h2>启动进度</h2>
+          <div id="services" class="services"></div>
+        </article>
+        <article class="card">
+          <h2>Docker 状态</h2>
+          <dl class="facts">
+            <div>
+              <dt>Docker CLI</dt>
+              <dd id="docker-cli">unknown</dd>
+            </div>
+            <div>
+              <dt>Docker Daemon</dt>
+              <dd id="docker-daemon">unknown</dd>
+            </div>
+            <div>
+              <dt>工作台</dt>
+              <dd id="web-url">http://127.0.0.1:5173</dd>
+            </div>
+            <div>
+              <dt>运行目录</dt>
+              <dd id="user-data">-</dd>
+            </div>
+          </dl>
+        </article>
+      </section>
+
+      <section class="card logs-card">
+        <div class="logs-heading">
+          <h2>错误日志</h2>
+          <span id="phase" class="pill">idle</span>
+        </div>
+        <pre id="logs">等待启动日志...</pre>
+      </section>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

@@ -9,6 +9,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -21,6 +22,8 @@ import {
 import { apiClient } from "@/lib/api-client";
 import { formatRelativeTime } from "@/lib/api-mappers";
 import type {
+  AdminLogRecord,
+  AdminLogsResponse,
   AdminModelCapabilityRecord,
   AdminProviderAlert,
   AdminProviderModelAvailability,
@@ -38,6 +41,19 @@ function getErrorMessage(error: unknown) {
 }
 
 const SENSITIVE_KEY_PATTERN = /api[-_ ]?key|authorization|bearer|password|secret|token/i;
+const surfacePanelClass =
+  "rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)]";
+const surfaceInsetClass =
+  "rounded-lg border border-[hsl(var(--outline-variant)/0.62)] bg-[hsl(var(--surface-container-low)/0.86)]";
+const surfaceCodeClass =
+  "rounded-lg border border-[hsl(var(--outline-variant)/0.56)] bg-[hsl(var(--surface-container-lowest)/0.92)]";
+const selectedSurfaceClass = "bg-[hsl(var(--surface-container-high)/0.82)]";
+const warningTextClass =
+  "text-[color:color-mix(in_oklab,#d97706_58%,hsl(var(--foreground)))]";
+const infoTextClass =
+  "text-[color:color-mix(in_oklab,#0284c7_58%,hsl(var(--foreground)))]";
+const successTextClass =
+  "text-[color:color-mix(in_oklab,#059669_58%,hsl(var(--foreground)))]";
 
 function sanitizeSensitiveText(value: string) {
   return value
@@ -107,7 +123,12 @@ function renderJson(value?: unknown) {
   }
 
   return (
-    <pre className="max-h-56 overflow-auto rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-relaxed text-muted-foreground">
+    <pre
+      className={cn(
+        surfaceCodeClass,
+        "max-h-56 overflow-auto p-3 text-xs leading-relaxed text-muted-foreground",
+      )}
+    >
       {JSON.stringify(sanitizeJsonValue(value), null, 2)}
     </pre>
   );
@@ -323,7 +344,7 @@ function getAvailabilityBadgeClass(status: ProviderModelAvailabilityItem["status
     return "border-destructive/40 bg-destructive/10 text-destructive";
   }
 
-  return "border-amber-400/30 bg-amber-400/10 text-amber-200";
+  return cn("border-amber-400/30 bg-amber-400/10", warningTextClass);
 }
 
 function getProviderWarningText(warning: AdminProviderWarning) {
@@ -337,6 +358,7 @@ function getProviderWarningText(warning: AdminProviderWarning) {
 }
 
 type ProviderAlertSeverity = "critical" | "warning" | "info";
+type AdminLogFilterLevel = "ALL" | "DEBUG" | "INFO" | "WARN" | "ERROR";
 
 function isProviderAlertActive(alert: AdminProviderAlert) {
   const status = alert.status?.toLowerCase();
@@ -386,10 +408,10 @@ function getProviderAlertBadgeClass(severity: ProviderAlertSeverity) {
   }
 
   if (severity === "warning") {
-    return "border-amber-400/30 bg-amber-400/10 text-amber-200";
+    return cn("border-amber-400/30 bg-amber-400/10", warningTextClass);
   }
 
-  return "border-sky-400/30 bg-sky-400/10 text-sky-200";
+  return cn("border-sky-400/30 bg-sky-400/10", infoTextClass);
 }
 
 function getProviderAlertCardClass(severity: ProviderAlertSeverity) {
@@ -451,6 +473,34 @@ async function fetchTaskDetail(id: string) {
   return { task, events };
 }
 
+function getLogLevelBadgeClass(level: string) {
+  const normalizedLevel = level.toUpperCase();
+
+  if (normalizedLevel === "ERROR") {
+    return "border-destructive/40 bg-destructive/10 text-destructive";
+  }
+
+  if (normalizedLevel === "WARN" || normalizedLevel === "WARNING") {
+    return cn("border-amber-400/30 bg-amber-400/10", warningTextClass);
+  }
+
+  if (normalizedLevel === "DEBUG") {
+    return cn("border-sky-400/30 bg-sky-400/10", infoTextClass);
+  }
+
+  return cn("border-emerald-400/25 bg-emerald-400/[0.06]", successTextClass);
+}
+
+function formatLogTrace(trace: AdminLogRecord["trace"]) {
+  if (!trace) {
+    return null;
+  }
+
+  return typeof trace === "string"
+    ? sanitizeSensitiveText(trace)
+    : JSON.stringify(sanitizeJsonValue(trace), null, 2);
+}
+
 export function AdminPage() {
   const [providerStatus, setProviderStatus] =
     useState<AdminProviderStatus | null>(null);
@@ -465,8 +515,15 @@ export function AdminPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedTask, setSelectedTask] = useState<ApiTask | null>(null);
   const [taskEvents, setTaskEvents] = useState<TaskEventRecord[]>([]);
+  const [adminLogs, setAdminLogs] = useState<AdminLogRecord[]>([]);
+  const [adminLogsTotal, setAdminLogsTotal] = useState<number | undefined>();
+  const [logLevel, setLogLevel] = useState<AdminLogFilterLevel>("DEBUG");
+  const [logSearch, setLogSearch] = useState("");
+  const [logLimit, setLogLimit] = useState(50);
+  const [lastLogRefreshAt, setLastLogRefreshAt] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isProviderLoading, setIsProviderLoading] = useState(true);
+  const [isLogsLoading, setIsLogsLoading] = useState(true);
   const [isProviderChecking, setIsProviderChecking] = useState(false);
   const [isProviderTesting, setIsProviderTesting] = useState(false);
   const [isDetailLoading, setIsDetailLoading] = useState(false);
@@ -475,6 +532,7 @@ export function AdminPage() {
   const [providerAlertError, setProviderAlertError] = useState<string | null>(null);
   const [providerTestError, setProviderTestError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [logsError, setLogsError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [modelActionId, setModelActionId] = useState<string | null>(null);
   const [retryingTaskId, setRetryingTaskId] = useState<string | null>(null);
@@ -487,12 +545,22 @@ export function AdminPage() {
     async function load() {
       setIsLoading(true);
       setIsProviderLoading(true);
+      setIsLogsLoading(true);
       setPageError(null);
       setProviderError(null);
+      setLogsError(null);
 
       const providerStatusRequest = apiClient
         .getAdminProvider()
         .then((provider) => ({ provider }))
+        .catch((error: unknown) => ({ error }));
+      const logsRequest = apiClient
+        .listAdminLogs({
+          level: logLevel,
+          search: logSearch,
+          limit: logLimit,
+        })
+        .then((response) => ({ response }))
         .catch((error: unknown) => ({ error }));
 
       try {
@@ -528,6 +596,7 @@ export function AdminPage() {
         }
       } finally {
         const providerResult = await providerStatusRequest;
+        const logsResult = await logsRequest;
         if (!ignore) {
           if ("provider" in providerResult) {
             setProviderStatus(providerResult.provider);
@@ -537,11 +606,24 @@ export function AdminPage() {
               `${getSafeErrorMessage(providerResult.error)} (API: ${apiClient.getBaseUrl()})`,
             );
           }
+
+          if ("response" in logsResult) {
+            setAdminLogs(logsResult.response.logs);
+            setAdminLogsTotal(logsResult.response.total);
+            setLastLogRefreshAt(new Date().toISOString());
+          } else {
+            setAdminLogs([]);
+            setAdminLogsTotal(undefined);
+            setLogsError(
+              `${getSafeErrorMessage(logsResult.error)} (API: ${apiClient.getBaseUrl()})`,
+            );
+          }
         }
 
         if (!ignore) {
           setIsLoading(false);
           setIsProviderLoading(false);
+          setIsLogsLoading(false);
           setIsDetailLoading(false);
         }
       }
@@ -586,6 +668,38 @@ export function AdminPage() {
       setProviderError(`${getSafeErrorMessage(requestError)} (API: ${apiClient.getBaseUrl()})`);
     } finally {
       setIsProviderLoading(false);
+    }
+  }
+
+  async function refreshAdminLogs(
+    options: {
+      level?: AdminLogFilterLevel;
+      search?: string;
+      limit?: number;
+    } = {},
+  ) {
+    const nextLevel = options.level ?? logLevel;
+    const nextSearch = options.search ?? logSearch;
+    const nextLimit = options.limit ?? logLimit;
+
+    setIsLogsLoading(true);
+    setLogsError(null);
+
+    try {
+      const response: AdminLogsResponse = await apiClient.listAdminLogs({
+        level: nextLevel,
+        search: nextSearch,
+        limit: nextLimit,
+      });
+      setAdminLogs(response.logs);
+      setAdminLogsTotal(response.total);
+      setLastLogRefreshAt(new Date().toISOString());
+    } catch (requestError: unknown) {
+      setAdminLogs([]);
+      setAdminLogsTotal(undefined);
+      setLogsError(`${getSafeErrorMessage(requestError)} (API: ${apiClient.getBaseUrl()})`);
+    } finally {
+      setIsLogsLoading(false);
     }
   }
 
@@ -807,6 +921,23 @@ export function AdminPage() {
   const providerAvailabilityItems = providerStatus
     ? getProviderModelAvailabilityItems(providerStatus, modelCapabilities)
     : [];
+  const lastLog = adminLogs[0];
+  const overviewProviderStatus = providerStatus
+    ? latestHealth
+      ? latestHealth.ok
+        ? "healthy"
+        : "attention"
+      : providerStatus.mode
+    : isProviderLoading
+      ? "loading"
+      : "unavailable";
+  const overviewLogStatus = isLogsLoading
+    ? "refreshing"
+    : logsError
+      ? "error"
+      : lastLogRefreshAt
+        ? `updated ${formatRelativeTime(lastLogRefreshAt)}`
+        : "not loaded";
   const providerWarningTexts = providerStatus
     ? [
         ...(providerStatus.warnings ?? []).map(getProviderWarningText),
@@ -836,8 +967,43 @@ export function AdminPage() {
     (providerStatus?.mode === "mock" || Boolean(providerStatus?.apiKeyConfigured));
 
   return (
-    <div className="grid gap-4 xl:grid-cols-[380px_minmax(0,1fr)]">
-      <div className="space-y-4">
+    <div className="space-y-4">
+      <Card className="overflow-hidden">
+        <CardHeader>
+          <CardTitle>Admin overview / 运维总览</CardTitle>
+          <CardDescription>
+            Provider readiness, workload, alert pressure, and DEBUG log visibility.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <InfoItem label="Provider" value={overviewProviderStatus} />
+            <InfoItem label="Tasks" value={isLoading ? "loading" : tasks.length} />
+            <InfoItem
+              label="Active Alerts"
+              value={isProviderLoading ? "loading" : providerAlertSummary.activeCount}
+            />
+            <InfoItem
+              label="Logs / Refresh"
+              value={`${adminLogsTotal ?? adminLogs.length} / ${overviewLogStatus}`}
+            />
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <Badge variant="outline">log level {logLevel}</Badge>
+            {lastLog ? (
+              <span className="break-all">
+                latest {lastLog.level} from {lastLog.context} at{" "}
+                {formatTimestamp(lastLog.timestamp)}
+              </span>
+            ) : (
+              <span>No logs loaded yet.</span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+
+      <div className="grid gap-4 xl:grid-cols-[420px_minmax(0,1fr)]">
+        <div className="space-y-4">
         <Card>
           <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
             <div>
@@ -857,7 +1023,7 @@ export function AdminPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             {isProviderLoading ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+              <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
                 Loading provider status...
               </div>
             ) : null}
@@ -867,14 +1033,14 @@ export function AdminPage() {
               </div>
             ) : null}
             {!isProviderLoading && !providerError && !providerStatus ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+              <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
                 Provider status is unavailable.
               </div>
             ) : null}
 
             {providerStatus ? (
               <>
-                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={cn(surfacePanelClass, "p-4")}>
                   <div className="flex flex-wrap items-center gap-2">
                     <Badge>{providerStatus.name || "Provider"}</Badge>
                     <Badge variant="outline">{providerStatus.type || "unknown"}</Badge>
@@ -919,7 +1085,12 @@ export function AdminPage() {
                 </div>
 
                 {providerWarningTexts.length > 0 ? (
-                  <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm text-amber-100">
+                  <div
+                    className={cn(
+                      "rounded-xl border border-amber-400/30 bg-amber-400/10 p-4 text-sm",
+                      warningTextClass,
+                    )}
+                  >
                     <div className="mb-2 font-medium">Provider warnings</div>
                     <ul className="space-y-1">
                       {[...new Set(providerWarningTexts)].map((warning) => (
@@ -929,7 +1100,7 @@ export function AdminPage() {
                   </div>
                 ) : null}
 
-                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={cn(surfacePanelClass, "p-4")}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-medium">Alerts</h4>
@@ -939,7 +1110,13 @@ export function AdminPage() {
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       {providerAlertSummary.activeCount === 0 ? (
-                        <Badge className="border-emerald-400/30 bg-emerald-400/10 text-emerald-200" variant="outline">
+                        <Badge
+                          className={cn(
+                            "border-emerald-400/30 bg-emerald-400/10",
+                            successTextClass,
+                          )}
+                          variant="outline"
+                        >
                           healthy / clear
                         </Badge>
                       ) : (
@@ -969,7 +1146,12 @@ export function AdminPage() {
                     </div>
                   ) : null}
                   {providerAlerts.length === 0 ? (
-                    <div className="mt-4 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.05] p-4 text-sm text-emerald-100">
+                    <div
+                      className={cn(
+                        "mt-4 rounded-lg border border-emerald-400/20 bg-emerald-400/[0.05] p-4 text-sm",
+                        successTextClass,
+                      )}
+                    >
                       No active alerts. Provider state is clear.
                     </div>
                   ) : (
@@ -1024,7 +1206,12 @@ export function AdminPage() {
                               </Button>
                             </div>
                             {taskId ? (
-                              <div className="mt-3 flex flex-col gap-2 rounded-lg border border-white/10 bg-black/10 p-3 sm:flex-row sm:items-center sm:justify-between">
+                              <div
+                                className={cn(
+                                  surfaceInsetClass,
+                                  "mt-3 flex flex-col gap-2 p-3 sm:flex-row sm:items-center sm:justify-between",
+                                )}
+                              >
                                 <div className="min-w-0">
                                   <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
                                     Related Task
@@ -1056,7 +1243,7 @@ export function AdminPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={cn(surfacePanelClass, "p-4")}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-medium">Model Availability</h4>
@@ -1071,7 +1258,7 @@ export function AdminPage() {
                       {providerAvailabilityItems.map((item) => (
                         <div
                           key={item.key}
-                          className="rounded-lg border border-white/10 bg-black/10 p-3"
+                          className={cn(surfaceInsetClass, "p-3")}
                         >
                           <div className="flex flex-wrap items-center justify-between gap-2">
                             <div>
@@ -1109,7 +1296,7 @@ export function AdminPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={cn(surfacePanelClass, "p-4")}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-medium">Health Check</h4>
@@ -1157,7 +1344,12 @@ export function AdminPage() {
                         />
                       </div>
                       {getHealthSummary(latestHealth) ? (
-                        <div className="rounded-lg border border-white/10 bg-black/10 p-3 text-sm text-muted-foreground">
+                        <div
+                          className={cn(
+                            surfaceInsetClass,
+                            "p-3 text-sm text-muted-foreground",
+                          )}
+                        >
                           {getHealthSummary(latestHealth)}
                         </div>
                       ) : null}
@@ -1169,7 +1361,7 @@ export function AdminPage() {
                   )}
                 </div>
 
-                <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                <div className={cn(surfacePanelClass, "p-4")}>
                   <div className="flex items-start justify-between gap-3">
                     <div>
                       <h4 className="text-sm font-medium">Test Generation</h4>
@@ -1267,7 +1459,7 @@ export function AdminPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             {isLoading ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+              <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
                 Loading model capabilities...
               </div>
             ) : null}
@@ -1282,14 +1474,14 @@ export function AdminPage() {
               </div>
             ) : null}
             {!isLoading && !pageError && modelCapabilities.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+              <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
                 No model capabilities found.
               </div>
             ) : null}
             {modelCapabilities.map((item) => (
               <div
                 key={item.id}
-                className="rounded-xl border border-white/10 bg-white/[0.03] px-4 py-3"
+                className={cn(surfacePanelClass, "px-4 py-3")}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div>
@@ -1375,7 +1567,7 @@ export function AdminPage() {
                     role="button"
                     tabIndex={0}
                     className={
-                      selectedTaskId === task.id ? "bg-white/10" : undefined
+                      selectedTaskId === task.id ? selectedSurfaceClass : undefined
                     }
                     onClick={() => void selectTask(task.id)}
                     onKeyDown={(event) => {
@@ -1403,8 +1595,9 @@ export function AdminPage() {
             </Table>
           </CardContent>
         </Card>
-      </div>
+        </div>
 
+        <div className="space-y-4">
       <Card ref={taskDetailRef}>
         <CardHeader className="flex-row items-start justify-between gap-4 space-y-0">
           <div>
@@ -1433,12 +1626,12 @@ export function AdminPage() {
             </div>
           ) : null}
           {isDetailLoading ? (
-            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+            <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
               Loading task detail...
             </div>
           ) : null}
           {!isDetailLoading && !selectedTask ? (
-            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-6 text-sm text-muted-foreground">
+            <div className={cn(surfacePanelClass, "p-6 text-sm text-muted-foreground")}>
               Select a task to inspect diagnostics.
             </div>
           ) : null}
@@ -1505,7 +1698,7 @@ export function AdminPage() {
                   </span>
                 </div>
                 {taskEvents.length === 0 ? (
-                  <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-muted-foreground">
+                  <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
                     No events recorded yet.
                   </div>
                 ) : null}
@@ -1513,7 +1706,7 @@ export function AdminPage() {
                   {taskEvents.map((event) => (
                     <div
                       key={event.id}
-                      className="rounded-xl border border-white/10 bg-white/[0.03] p-4"
+                      className={cn(surfacePanelClass, "p-4")}
                     >
                       <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline">{event.eventType}</Badge>
@@ -1536,17 +1729,172 @@ export function AdminPage() {
           ) : null}
         </CardContent>
       </Card>
+          <Card>
+            <CardHeader className="flex-row items-start justify-between gap-3 space-y-0">
+              <div>
+                <CardTitle>系统日志 / DEBUG</CardTitle>
+                <CardDescription>
+                  Filtered admin logs from /api/admin/logs. Messages stay compact and copy friendly.
+                </CardDescription>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isLogsLoading}
+                onClick={() => void refreshAdminLogs()}
+              >
+                {isLogsLoading ? "Refreshing..." : "Refresh logs"}
+              </Button>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 lg:grid-cols-[140px_minmax(0,1fr)_120px_auto]">
+                <label className="space-y-1 text-sm">
+                  <span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                    Level
+                  </span>
+                  <select
+                    className="flex h-10 w-full rounded-md border border-input bg-[hsl(var(--surface-container-low)/0.78)] px-3 py-2 text-sm text-foreground shadow-[var(--input-shadow)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    value={logLevel}
+                    onChange={(event) => {
+                      const nextLevel = event.target.value as AdminLogFilterLevel;
+                      setLogLevel(nextLevel);
+                      void refreshAdminLogs({ level: nextLevel });
+                    }}
+                  >
+                    {(["DEBUG", "INFO", "WARN", "ERROR", "ALL"] as const).map((level) => (
+                      <option key={level} value={level}>
+                        {level}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                    Search
+                  </span>
+                  <Input
+                    value={logSearch}
+                    placeholder="context, message, trace"
+                    onChange={(event) => setLogSearch(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        void refreshAdminLogs();
+                      }
+                    }}
+                  />
+                </label>
+                <label className="space-y-1 text-sm">
+                  <span className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
+                    Limit
+                  </span>
+                  <Input
+                    min={1}
+                    max={500}
+                    type="number"
+                    value={logLimit}
+                    onChange={(event) => {
+                      const nextLimit = Number(event.target.value);
+                      if (Number.isFinite(nextLimit)) {
+                        setLogLimit(nextLimit);
+                      }
+                    }}
+                  />
+                </label>
+                <div className="flex items-end">
+                  <Button
+                    className="w-full"
+                    variant="secondary"
+                    disabled={isLogsLoading}
+                    onClick={() => void refreshAdminLogs()}
+                  >
+                    Apply
+                  </Button>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="outline">{adminLogsTotal ?? adminLogs.length} logs</Badge>
+                <Badge variant="outline">{overviewLogStatus}</Badge>
+                {logsError ? (
+                  <span className="break-all text-destructive">{logsError}</span>
+                ) : null}
+              </div>
+
+              {isLogsLoading ? (
+                <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
+                  Loading logs...
+                </div>
+              ) : null}
+              {!isLogsLoading && !logsError && adminLogs.length === 0 ? (
+                <div className={cn(surfacePanelClass, "p-4 text-sm text-muted-foreground")}>
+                  No logs returned for the current filter.
+                </div>
+              ) : null}
+              <div className="space-y-2">
+                {adminLogs.map((log) => {
+                  const trace = formatLogTrace(log.trace);
+
+                  return (
+                    <div
+                      key={log.id}
+                      className={cn(surfacePanelClass, "p-3")}
+                    >
+                      <div className="grid gap-2 lg:grid-cols-[180px_90px_160px_minmax(0,1fr)] lg:items-start">
+                        <span className="text-xs text-muted-foreground">
+                          {formatTimestamp(log.timestamp)}
+                        </span>
+                        <Badge
+                          variant="outline"
+                          className={getLogLevelBadgeClass(log.level)}
+                        >
+                          {log.level}
+                        </Badge>
+                        <code
+                          className={cn(
+                            "min-w-0 break-all rounded px-2 py-1 text-xs text-muted-foreground",
+                            "bg-[hsl(var(--surface-container-lowest)/0.86)]",
+                          )}
+                        >
+                          {sanitizeSensitiveText(log.context)}
+                        </code>
+                        <pre
+                          className={cn(
+                            "min-w-0 whitespace-pre-wrap break-words rounded px-2 py-1 text-xs leading-relaxed text-foreground",
+                            "bg-[hsl(var(--surface-container-low)/0.84)]",
+                          )}
+                        >
+                          {sanitizeSensitiveText(log.message)}
+                        </pre>
+                      </div>
+                      {trace ? (
+                        <details className={cn(surfaceInsetClass, "mt-2 p-2")}>
+                          <summary className="cursor-pointer text-xs text-muted-foreground">
+                            trace
+                          </summary>
+                          <pre className="mt-2 max-h-56 overflow-auto whitespace-pre-wrap break-words text-xs leading-relaxed text-muted-foreground">
+                            {trace}
+                          </pre>
+                        </details>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }
 
 function InfoItem({ label, value }: { label: string; value?: string | number | null }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+    <div className={cn(surfaceInsetClass, "rounded-xl p-3")}>
       <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">
         {label}
       </p>
-      <p className="mt-1 break-all text-sm">{value || "-"}</p>
+      <p className="mt-1 break-all text-sm">{value ?? "-"}</p>
     </div>
   );
 }

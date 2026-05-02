@@ -25,7 +25,7 @@ const config = {
   businessModel:
     process.env.REGRESSION_MODEL ||
     process.env.YUNWU_DEFAULT_GENERATE_MODEL ||
-    "flux-schnell",
+    "gpt-image-2",
   taskTimeoutMs: toNumber(process.env.REGRESSION_TASK_TIMEOUT_MS, 120000),
   taskPollMs: toNumber(process.env.REGRESSION_TASK_POLL_MS, 3000),
   providerPrompt:

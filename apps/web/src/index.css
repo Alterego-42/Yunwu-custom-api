@@ -24,6 +24,206 @@
     --input: 217 24% 20%;
     --ring: 194 95% 68%;
     --radius: 1rem;
+    --surface: 222 45% 11%;
+    --surface-variant: 222 30% 18%;
+    --surface-container-lowest: 222 47% 8%;
+    --surface-container-low: 222 42% 10%;
+    --surface-container: 222 45% 11%;
+    --surface-container-high: 222 30% 18%;
+    --surface-container-highest: 214 32% 18%;
+    --outline: 217 24% 20%;
+    --outline-variant: 220 24% 24%;
+    --shadow-rgb: 0, 0, 0;
+    --mdui-elevation-level0: none;
+    --mdui-elevation-level1: 0 0.5px 1.5px 0 rgba(var(--shadow-rgb), 19%), 0 0 1px 0 rgba(var(--shadow-rgb), 3.9%);
+    --mdui-elevation-level2: 0 0.85px 3px 0 rgba(var(--shadow-rgb), 19%), 0 0.25px 1px 0 rgba(var(--shadow-rgb), 3.9%);
+    --mdui-elevation-level3: 0 1.25px 5px 0 rgba(var(--shadow-rgb), 19%), 0 0.3333px 1.5px 0 rgba(var(--shadow-rgb), 3.9%);
+    --panel-shadow: var(--mdui-elevation-level2);
+    --header-shadow: var(--mdui-elevation-level1);
+    --button-shadow: var(--mdui-elevation-level1);
+    --input-shadow: none;
+    --shell-accent-glow: rgba(56, 189, 248, 0.18);
+    --shell-secondary-glow: rgba(22, 78, 99, 0.22);
+    --shell-gradient-start: #08111f;
+    --shell-gradient-mid: #0b1120;
+    --shell-gradient-end: #020617;
+    --shell-gradient-angle: 180deg;
+    --shell-bg: radial-gradient(circle at 18% 0%, var(--shell-accent-glow), transparent 34%),
+      radial-gradient(circle at 86% 12%, var(--shell-secondary-glow), transparent 32%),
+      linear-gradient(var(--shell-gradient-angle), var(--shell-gradient-start) 0%, var(--shell-gradient-mid) 52%, var(--shell-gradient-end) 100%);
+    --shell-grid-opacity: 0.2;
+  }
+
+  :root[data-theme="dark"][data-theme-preset="graphite"] {
+    --background: 220 19% 8%;
+    --card: 220 16% 12%;
+    --popover: 220 16% 12%;
+    --primary: 160 84% 58%;
+    --primary-foreground: 220 19% 8%;
+    --secondary: 220 12% 18%;
+    --muted: 220 12% 16%;
+    --accent: 215 14% 18%;
+    --ring: 160 84% 58%;
+    --border: 220 12% 22%;
+    --input: 220 12% 22%;
+    --shell-accent-glow: rgba(45, 212, 191, 0.11);
+    --shell-secondary-glow: rgba(51, 65, 85, 0.12);
+    --shell-gradient-start: #121417;
+    --shell-gradient-mid: #0b0f14;
+    --shell-gradient-end: #050608;
+    --shell-gradient-angle: 150deg;
+  }
+
+  :root[data-theme="dark"][data-theme-preset="violet"] {
+    --background: 245 42% 9%;
+    --card: 245 34% 12%;
+    --popover: 245 34% 12%;
+    --primary: 262 83% 72%;
+    --primary-foreground: 245 42% 9%;
+    --secondary: 246 24% 18%;
+    --muted: 246 24% 16%;
+    --accent: 262 28% 19%;
+    --ring: 262 83% 72%;
+    --border: 246 22% 23%;
+    --input: 246 22% 23%;
+    --shell-accent-glow: rgba(167, 139, 250, 0.14);
+    --shell-secondary-glow: rgba(107, 33, 168, 0.12);
+    --shell-gradient-start: #15102c;
+    --shell-gradient-mid: #111827;
+    --shell-gradient-end: #060714;
+    --shell-gradient-angle: 155deg;
+  }
+
+  :root[data-theme="light"] {
+    --background: 204 45% 96%;
+    --foreground: 222 47% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 10%;
+    --primary: 199 89% 42%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 204 30% 90%;
+    --secondary-foreground: 222 47% 10%;
+    --muted: 204 28% 90%;
+    --muted-foreground: 215 18% 36%;
+    --accent: 200 36% 88%;
+    --accent-foreground: 222 47% 10%;
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 210 20% 78%;
+    --input: 210 20% 78%;
+    --ring: 199 89% 42%;
+    --surface: 0 0% 100%;
+    --surface-variant: 204 30% 90%;
+    --surface-container-lowest: 0 0% 100%;
+    --surface-container-low: 204 55% 99%;
+    --surface-container: 204 42% 98%;
+    --surface-container-high: 204 34% 97%;
+    --surface-container-highest: 200 36% 95%;
+    --outline: 210 20% 78%;
+    --outline-variant: 210 28% 86%;
+    --shadow-rgb: 15, 23, 42;
+    --mdui-elevation-level0: none;
+    --mdui-elevation-level1: 0 1px 2px rgba(var(--shadow-rgb), 0.045);
+    --mdui-elevation-level2: 0 2px 6px rgba(var(--shadow-rgb), 0.055);
+    --mdui-elevation-level3: 0 4px 12px rgba(var(--shadow-rgb), 0.065);
+    --panel-shadow: var(--mdui-elevation-level1);
+    --header-shadow: var(--mdui-elevation-level1);
+    --button-shadow: var(--mdui-elevation-level1);
+    --input-shadow: none;
+    --shell-accent-glow: rgba(14, 165, 233, 0.16);
+    --shell-secondary-glow: rgba(186, 230, 253, 0.2);
+    --shell-gradient-start: #fbfdff;
+    --shell-gradient-mid: #eef7fb;
+    --shell-gradient-end: #e8f1ff;
+    --shell-gradient-angle: 160deg;
+    --shell-grid-opacity: 0.13;
+  }
+
+  :root[data-theme="light"][data-theme-preset="sunrise"] {
+    --background: 32 70% 96%;
+    --foreground: 224 34% 14%;
+    --card: 36 100% 99%;
+    --card-foreground: 224 34% 14%;
+    --popover: 36 100% 99%;
+    --popover-foreground: 224 34% 14%;
+    --primary: 18 86% 48%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 34 54% 90%;
+    --muted: 34 46% 91%;
+    --muted-foreground: 224 14% 38%;
+    --accent: 24 70% 89%;
+    --ring: 18 86% 48%;
+    --border: 32 28% 78%;
+    --input: 32 28% 78%;
+    --surface-container-low: 36 100% 99%;
+    --surface-container: 34 72% 98%;
+    --surface-container-high: 34 58% 96%;
+    --surface-container-highest: 24 70% 94%;
+    --shell-accent-glow: rgba(251, 146, 60, 0.12);
+    --shell-secondary-glow: rgba(247, 201, 127, 0.12);
+    --shell-gradient-start: #fffaf2;
+    --shell-gradient-mid: #fff1e6;
+    --shell-gradient-end: #eaf4ff;
+    --shell-gradient-angle: 155deg;
+  }
+
+  :root[data-theme="light"][data-theme-preset="sage"] {
+    --background: 102 32% 95%;
+    --foreground: 160 28% 13%;
+    --card: 96 45% 98%;
+    --card-foreground: 160 28% 13%;
+    --popover: 96 45% 98%;
+    --popover-foreground: 160 28% 13%;
+    --primary: 158 58% 34%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 96 24% 88%;
+    --muted: 96 20% 89%;
+    --muted-foreground: 158 14% 35%;
+    --accent: 148 24% 87%;
+    --ring: 158 58% 34%;
+    --border: 112 16% 76%;
+    --input: 112 16% 76%;
+    --surface-container-low: 96 55% 99%;
+    --surface-container: 100 38% 98%;
+    --surface-container-high: 104 28% 96%;
+    --surface-container-highest: 148 24% 94%;
+    --shell-accent-glow: rgba(52, 211, 153, 0.11);
+    --shell-secondary-glow: rgba(141, 219, 199, 0.12);
+    --shell-gradient-start: #fbfff7;
+    --shell-gradient-mid: #edf7e7;
+    --shell-gradient-end: #e6f1ee;
+    --shell-gradient-angle: 155deg;
+  }
+
+  :root[data-theme="custom"] {
+    --shell-accent-glow: hsl(var(--primary) / 0.34);
+    --shell-secondary-glow: rgba(22, 78, 99, 0.38);
+    --shell-gradient-start: var(--custom-bg, #08111f);
+    --shell-gradient-mid: var(--custom-bg-2, #164e63);
+    --shell-gradient-end: var(--custom-bg, #08111f);
+    --shell-gradient-angle: var(--custom-gradient-angle, 145deg);
+  }
+
+  :root[data-font-size="small"] {
+    font-size: 14px;
+  }
+
+  :root[data-font-size="medium"] {
+    font-size: 16px;
+  }
+
+  :root[data-font-size="large"] {
+    font-size: 18px;
+  }
+
+  :root[data-density="compact"] {
+    --radius: 0.75rem;
+  }
+
+  :root[data-density="spacious"] {
+    --radius: 1.25rem;
   }
 
   * {
@@ -51,5 +251,9 @@
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     overflow: hidden;
+  }
+
+  .bg-app-shell {
+    background: var(--shell-bg);
   }
 }

@@ -5,22 +5,22 @@ import { Slot } from "@radix-ui/react-slot";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-full text-sm font-medium transition-all disabled:pointer-events-none disabled:opacity-50 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background",
   {
     variants: {
       variant: {
         default:
-          "bg-primary text-primary-foreground shadow-sm hover:bg-primary/90",
+          "bg-primary text-primary-foreground shadow-[var(--button-shadow)] hover:bg-primary/90 hover:shadow-[var(--mdui-elevation-level2)]",
         secondary:
-          "bg-secondary text-secondary-foreground border border-border hover:bg-secondary/80",
-        ghost: "text-foreground hover:bg-white/5",
+          "border border-[hsl(var(--outline-variant)/0.75)] bg-[hsl(var(--surface-container-high))] text-secondary-foreground hover:bg-[hsl(var(--surface-container-highest))]",
+        ghost: "text-foreground hover:bg-[hsl(var(--surface-container-high)/0.62)]",
         outline:
-          "border border-border bg-background/80 text-foreground hover:bg-accent hover:text-accent-foreground",
+          "border border-[hsl(var(--outline-variant)/0.75)] bg-[hsl(var(--surface-container-low)/0.72)] text-foreground hover:bg-[hsl(var(--surface-container))] hover:text-accent-foreground",
       },
       size: {
         default: "h-10 px-4 py-2",
-        sm: "h-8 rounded-md px-3 text-xs",
-        lg: "h-11 rounded-md px-6",
+        sm: "h-8 px-3 text-xs",
+        lg: "h-11 px-6",
         icon: "h-10 w-10",
       },
     },

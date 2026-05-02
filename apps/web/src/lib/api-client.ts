@@ -1,12 +1,16 @@
 import type {
   AdminProviderAlert,
   AdminProviderAlertSummary,
+  AdminLogRecord,
+  AdminLogsResponse,
   AdminModelCapabilityRecord,
   AdminProviderModelAvailability,
   AdminProviderCheckResult,
   AdminProviderStatus,
   AdminProviderTestGenerateResult,
+  ApiKeyMutationResponse,
   ConversationDetail,
+  ConversationMutationResponse,
   ConversationSummary,
   CreateConversationInput,
   CreateTaskInput,
@@ -21,6 +25,7 @@ import type {
   TaskEventRecord,
   UploadAssetResponse,
 } from "@/lib/api-types";
+import { type UserSettings } from "@/lib/user-settings";
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost"]);
 
@@ -460,6 +465,120 @@ function normalizeProviderTestGenerateResult(
   return normalizeAdminProviderTestResultFields(payload);
 }
 
+function normalizeAdminLogRecord(value: unknown, index: number): AdminLogRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const timestamp =
+    typeof value.timestamp === "string"
+      ? value.timestamp
+      : typeof value.createdAt === "string"
+        ? value.createdAt
+        : typeof value.time === "string"
+          ? value.time
+          : typeof value.ts === "string"
+            ? value.ts
+            : new Date().toISOString();
+  const level =
+    typeof value.level === "string"
+      ? value.level.toUpperCase()
+      : typeof value.severity === "string"
+        ? value.severity.toUpperCase()
+        : "INFO";
+  const context =
+    typeof value.context === "string"
+      ? value.context
+      : typeof value.scope === "string"
+        ? value.scope
+        : typeof value.module === "string"
+          ? value.module
+          : "-";
+  const message =
+    typeof value.message === "string"
+      ? value.message
+      : typeof value.msg === "string"
+        ? value.msg
+        : typeof value.summary === "string"
+          ? value.summary
+          : JSON.stringify(value);
+
+  return {
+    id:
+      typeof value.id === "string"
+        ? value.id
+        : typeof value.logId === "string"
+          ? value.logId
+          : `${timestamp}-${index}`,
+    timestamp,
+    level,
+    context,
+    message,
+    trace:
+      typeof value.trace === "string" || isRecord(value.trace)
+        ? value.trace
+        : typeof value.stack === "string"
+          ? value.stack
+          : null,
+  };
+}
+
+function normalizeAdminLogsResponse(payload: unknown): AdminLogsResponse {
+  const root = isRecord(payload) ? payload : {};
+  const rawLogs =
+    Array.isArray(payload)
+      ? payload
+      : Array.isArray(root.logs)
+        ? root.logs
+        : Array.isArray(root.items)
+          ? root.items
+          : Array.isArray(root.records)
+            ? root.records
+            : Array.isArray(root.data)
+              ? root.data
+              : [];
+
+  const total =
+    typeof root.total === "number"
+      ? root.total
+      : typeof root.count === "number"
+        ? root.count
+        : undefined;
+
+  return {
+    logs: rawLogs
+      .map((item, index) => normalizeAdminLogRecord(item, index))
+      .filter((item): item is AdminLogRecord => Boolean(item)),
+    total,
+  };
+}
+
+function normalizeAdminLogRequestLevel(level: string) {
+  const normalizedLevel = level.toUpperCase();
+
+  if (normalizedLevel === "DEBUG") {
+    return "debug";
+  }
+
+  if (normalizedLevel === "INFO") {
+    return "log";
+  }
+
+  if (normalizedLevel === "WARN") {
+    return "warn";
+  }
+
+  if (normalizedLevel === "ERROR") {
+    return "error";
+  }
+
+  if (normalizedLevel === "ALL") {
+    return "all";
+  }
+
+  return level.toLowerCase();
+}
+
 type SessionResponse = {
   user: {
     id: string;
@@ -546,9 +665,76 @@ export const apiClient = {
     return unwrapObject<ConversationDetail>(payload, "conversation");
   },
 
+  async archiveConversation(id: string) {
+    return request<ConversationMutationResponse>(
+      `/conversations/${encodeURIComponent(id)}/archive`,
+      {
+        method: "PATCH",
+      },
+    );
+  },
+
+  async deleteConversation(id: string) {
+    return request<ConversationMutationResponse>(
+      `/conversations/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+      },
+    );
+  },
+
   async listModels() {
     const payload = await request<unknown>("/models");
     return unwrapList<ModelRecord>(payload, "models");
+  },
+
+  async getUserSettings() {
+    return request<unknown>("/settings");
+  },
+
+  async updateUserSettings(input: UserSettings) {
+    return request<unknown>("/settings", {
+      method: "PATCH",
+      body: {
+        baseUrl: input.baseUrl,
+        enabledModelIds: input.availableModelIds,
+        ui: {
+          ...input.ui,
+          theme: input.theme,
+          themePreset: input.themePreset,
+          darkPreset: input.darkPreset,
+          lightPreset: input.lightPreset,
+          customColor: input.customColor,
+          customTheme: input.customTheme,
+        },
+      },
+    });
+  },
+
+  async updateUserApiKey(apiKey: string) {
+    return request<ApiKeyMutationResponse>("/settings", {
+      method: "PATCH",
+      body: { apiKey },
+    });
+  },
+
+  async verifyUserApiKey(apiKey?: string) {
+    const response = await request<ApiKeyMutationResponse>("/settings/api-key/check", {
+      method: "POST",
+      body: apiKey ? { apiKey } : {},
+    });
+    if (response.ok === false) {
+      throw new ApiError(response.message ?? "API key connectivity check failed.");
+    }
+
+    return response;
+  },
+
+  async clearUserApiKey() {
+    return request<ApiKeyMutationResponse>("/settings", {
+      method: "PATCH",
+      body: { apiKey: null },
+    });
   },
 
   async listTasks() {
@@ -604,6 +790,29 @@ export const apiClient = {
         method: "POST",
       },
     );
+  },
+
+  async listAdminLogs(
+    options: {
+      level?: string;
+      search?: string;
+      limit?: number;
+    } = {},
+  ) {
+    const params = new URLSearchParams();
+    if (options.level) {
+      params.set("level", normalizeAdminLogRequestLevel(options.level));
+    }
+    if (options.search?.trim()) {
+      params.set("search", options.search.trim());
+    }
+    if (typeof options.limit === "number" && Number.isFinite(options.limit)) {
+      params.set("limit", String(options.limit));
+    }
+
+    const query = params.toString();
+    const payload = await request<unknown>(`/admin/logs${query ? `?${query}` : ""}`);
+    return normalizeAdminLogsResponse(payload);
   },
 
   async updateAdminModelCapability(id: string, input: { enabled: boolean }) {

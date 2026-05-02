@@ -17,6 +17,7 @@ import { HomePage } from "@/pages/home-page";
 import { LibraryPage } from "@/pages/library-page";
 import { LoginPage } from "@/pages/login-page";
 import { RegisterPage } from "@/pages/register-page";
+import { SettingsPage } from "@/pages/settings-page";
 import { WorkspacePage } from "@/pages/workspace-page";
 
 function FullscreenState({ children }: { children: ReactNode }) {
@@ -116,6 +117,10 @@ export function createAppRoutes(): RouteObject[] {
         {
           path: "library",
           element: <LibraryPage />,
+        },
+        {
+          path: "settings",
+          element: <SettingsPage />,
         },
         {
           path: "*",

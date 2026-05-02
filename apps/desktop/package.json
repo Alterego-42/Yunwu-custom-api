@@ -1,0 +1,56 @@
+{
+  "name": "@yunwu/desktop",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Yunwu desktop shell",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "pnpm build && electron .",
+    "build": "tsc -p tsconfig.json && node scripts/copy-renderer.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "package": "pnpm build && electron-builder --win zip",
+    "package:dir": "pnpm build && electron-builder --win dir"
+  },
+  "dependencies": {
+    "electron-log": "^5.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "electron": "^37.6.0",
+    "electron-builder": "^26.0.12",
+    "typescript": "5.7.3"
+  },
+  "build": {
+    "appId": "ai.yunwu.desktop",
+    "productName": "Yunwu Desktop",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../../infra",
+        "to": "infra"
+      },
+      {
+        "from": "resources",
+        "to": "desktop"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-win-${arch}-portable.${ext}"
+    }
+  }
+}

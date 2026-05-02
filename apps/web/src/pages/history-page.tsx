@@ -51,7 +51,7 @@ export function HistoryPage() {
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <Card className="border-white/10 bg-white/[0.03]">
+      <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Clock3 className="h-5 w-5 text-primary" />
@@ -69,18 +69,18 @@ export function HistoryPage() {
 
       <div className="space-y-4">
         {loading ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
             正在加载历史记录...
           </div>
         ) : null}
         {!loading && !data?.items.length ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
             暂无任务历史。
           </div>
         ) : null}
 
         {data?.items.map((task) => (
-          <Card key={task.id} className="border-white/10 bg-white/[0.03]">
+          <Card key={task.id}>
             <CardHeader className="pb-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="space-y-1">

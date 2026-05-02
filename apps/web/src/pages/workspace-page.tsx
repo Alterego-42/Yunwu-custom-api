@@ -8,6 +8,7 @@ import { SessionList } from "@/components/chat/session-list";
 import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api-client";
 import {
+  buildTaskRoundNavigation,
   getTaskComposerAssets,
   getTaskIntentMode,
   isTaskActive,
@@ -23,7 +24,9 @@ import type {
   ModelRecord,
   TaskRecord,
   UiTask,
+  UiTaskRoundNavigation,
 } from "@/lib/api-types";
+import { cn } from "@/lib/utils";
 
 type ConnectionMode = "sse" | "polling" | "connecting" | "idle";
 
@@ -55,13 +58,17 @@ function getPollingDelay(tasks: TaskRecord[]) {
   return 2500;
 }
 
+function confirmSessionAction(action: "archive" | "delete") {
+  const label = action === "archive" ? "归档" : "删除";
+  return window.confirm(`${label}后该会话会从当前工作台列表中移除，是否继续？`);
+}
+
 export function WorkspacePage() {
   const navigate = useNavigate();
   const location = useLocation();
   const params = useParams();
   const routeConversationId =
     typeof params.conversationId === "string" ? params.conversationId : undefined;
-  const isRouteDriven = Boolean(routeConversationId);
 
   const [sessions, setSessions] = useState<ConversationSummary[]>([]);
   const [fallbackActiveId, setFallbackActiveId] = useState<string>();
@@ -76,7 +83,10 @@ export function WorkspacePage() {
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>("idle");
   const [composerContext, setComposerContext] = useState<ComposerContext | null>(null);
+  const [isSessionListCollapsed, setIsSessionListCollapsed] = useState(false);
+  const [focusedTaskId, setFocusedTaskId] = useState<string>();
   const activeSessionRef = useRef<ConversationDetail | undefined>(undefined);
+  const removedSessionIdsRef = useRef(new Set<string>());
   const refreshPromiseRef = useRef<{
     conversationId: string;
     promise: Promise<ConversationDetail>;
@@ -95,6 +105,10 @@ export function WorkspacePage() {
   }, [activeId]);
 
   const applyConversation = useCallback((conversation: ConversationDetail) => {
+    if (removedSessionIdsRef.current.has(conversation.id)) {
+      return;
+    }
+
     setActiveSession(conversation);
     setSessions((current) => {
       const summary = toConversationSummary(conversation);
@@ -158,11 +172,29 @@ export function WorkspacePage() {
         apiClient.listModels(),
       ]);
 
-      setSessions(conversationList);
+      setSessions(conversationList.filter((conversation) => !removedSessionIdsRef.current.has(conversation.id)));
       setModels(modelList);
       setFallbackActiveId((current) => current ?? (!routeConversationId ? conversationList[0]?.id : current));
+
+      const modelHydration = await Promise.allSettled(
+        conversationList
+          .filter((conversation) => !conversation.model)
+          .map((conversation) => apiClient.getConversation(conversation.id)),
+      );
+      const hydratedSummaries = modelHydration
+        .filter((result): result is PromiseFulfilledResult<ConversationDetail> => result.status === "fulfilled")
+        .map((result) => toConversationSummary(result.value));
+
+      if (hydratedSummaries.length > 0) {
+        setSessions((current) =>
+          current.map((item) => {
+            const hydrated = hydratedSummaries.find((summary) => summary.id === item.id);
+            return hydrated ? { ...item, ...hydrated } : item;
+          }),
+        );
+      }
     } catch (error) {
-      setListError(`${getErrorMessage(error)}（API: ${apiClient.getBaseUrl()}）`);
+      setListError(getErrorMessage(error));
       setSessions([]);
       setModels([]);
     } finally {
@@ -289,10 +321,35 @@ export function WorkspacePage() {
     [activeSession],
   );
 
+  useEffect(() => {
+    if (!focusedTaskId || !activeSession?.tasks.some((task) => task.id === focusedTaskId)) {
+      setFocusedTaskId(undefined);
+    }
+  }, [activeSession, focusedTaskId]);
+
   const uiTasks = useMemo(
     () => activeSession?.tasks.map((task) => toUiTask(task, activeSession.assets)) ?? [],
     [activeSession],
   );
+
+  const taskRoundNavigationById = useMemo(() => {
+    if (!activeSession) {
+      return new Map<string, UiTaskRoundNavigation & { onPrevious?: () => void; onNext?: () => void }>();
+    }
+
+    const baseNavigation = buildTaskRoundNavigation(activeSession.tasks);
+    const navigation = new Map<string, UiTaskRoundNavigation & { onPrevious?: () => void; onNext?: () => void }>();
+
+    baseNavigation.forEach((entry, taskId) => {
+      navigation.set(taskId, {
+        ...entry,
+        onPrevious: entry.previousTaskId ? () => setFocusedTaskId(entry.previousTaskId) : undefined,
+        onNext: entry.nextTaskId ? () => setFocusedTaskId(entry.nextTaskId) : undefined,
+      });
+    });
+
+    return navigation;
+  }, [activeSession]);
 
   const queueLength = uiTasks.filter((task) =>
     ["queued", "submitted", "running"].includes(task.status),
@@ -321,34 +378,80 @@ export function WorkspacePage() {
     [activeSession],
   );
 
-  const handleCreateSession = useCallback(async () => {
-    if (isRouteDriven) {
-      navigate("/create");
-      return;
-    }
-
-    setListError(null);
-    try {
-      const conversation = await apiClient.createConversation({
-        title: `新会话 ${new Date().toLocaleTimeString()}`,
-      });
-      applyConversation(conversation);
-      setFallbackActiveId(conversation.id);
-    } catch (error) {
-      setListError(getErrorMessage(error));
-    }
-  }, [applyConversation, isRouteDriven, navigate]);
+  const handleCreateSession = useCallback(() => {
+    navigate("/create");
+  }, [navigate]);
 
   const handleSelectSession = useCallback(
     (conversationId: string) => {
-      if (isRouteDriven) {
+      if (routeConversationId) {
         navigate(`/workspace/${conversationId}`);
         return;
       }
 
       setFallbackActiveId(conversationId);
     },
-    [isRouteDriven, navigate],
+    [navigate, routeConversationId],
+  );
+
+  const removeSessionFromList = useCallback(
+    (conversationId: string) => {
+      removedSessionIdsRef.current.add(conversationId);
+      setSessions((current) => {
+        const next = current.filter((item) => item.id !== conversationId);
+
+        if (conversationId === activeId) {
+          const nextActiveId = next[0]?.id;
+          setActiveSession(undefined);
+          if (nextActiveId) {
+            if (routeConversationId) {
+              navigate(`/workspace/${nextActiveId}`, { replace: true });
+            } else {
+              setFallbackActiveId(nextActiveId);
+            }
+          } else {
+            navigate("/create", { replace: true });
+          }
+        }
+
+        return next;
+      });
+    },
+    [activeId, navigate, routeConversationId],
+  );
+
+  const handleArchiveSession = useCallback(
+    async (conversationId: string) => {
+      if (!confirmSessionAction("archive")) {
+        return;
+      }
+
+      setListError(null);
+      try {
+        await apiClient.archiveConversation(conversationId);
+        removeSessionFromList(conversationId);
+      } catch (error) {
+        setListError(getErrorMessage(error));
+      }
+    },
+    [removeSessionFromList],
+  );
+
+  const handleDeleteSession = useCallback(
+    async (conversationId: string) => {
+      if (!confirmSessionAction("delete")) {
+        return;
+      }
+
+      setListError(null);
+      try {
+        await apiClient.deleteConversation(conversationId);
+        removeSessionFromList(conversationId);
+      } catch (error) {
+        setListError(getErrorMessage(error));
+      }
+    },
+    [removeSessionFromList],
   );
 
   const handleUploadAsset = useCallback(
@@ -443,12 +546,19 @@ export function WorkspacePage() {
 
   const handleRetryTask = useCallback(
     async (task: TaskRecord) => {
-      await apiClient.retryTask(task.id);
-      if (task.conversationId) {
-        await refreshConversation(task.conversationId, { silent: true });
+      setDetailError(null);
+      const retryTask = await apiClient.retryTask(task.id);
+      const conversationId = retryTask.conversationId ?? task.conversationId;
+      setFocusedTaskId(retryTask.id);
+
+      if (conversationId) {
+        if (conversationId !== activeId && location.pathname.startsWith("/workspace/")) {
+          navigate(`/workspace/${conversationId}`);
+        }
+        await refreshConversation(conversationId, { silent: true });
       }
     },
-    [refreshConversation],
+    [activeId, location.pathname, navigate, refreshConversation],
   );
 
   const renderTaskActions = useCallback(
@@ -461,6 +571,11 @@ export function WorkspacePage() {
       const actions: ReactNode[] = [];
 
       if (task.status === "succeeded") {
+        actions.push(
+          <Button key={`${task.id}-retry`} size="sm" variant="outline" onClick={() => void handleRetryTask(task)}>
+            重试
+          </Button>,
+        );
         actions.push(
           <Button key={`${task.id}-edit`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "edit")}>
             再编辑
@@ -505,8 +620,19 @@ export function WorkspacePage() {
   );
 
   return (
-    <div className="flex min-h-0 flex-col gap-4">
-      <div className="grid h-[calc(100vh-220px)] min-h-[640px] gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
+    <div
+      className="flex h-[calc(100dvh-104px)] min-h-[520px] min-w-0 flex-col overflow-hidden"
+      data-testid="workspace-page-shell"
+    >
+      <div
+        className={cn(
+          "grid min-h-0 flex-1 gap-3 overflow-hidden transition-[grid-template-columns] xl:grid-cols-[300px_minmax(0,1fr)] 2xl:grid-cols-[320px_minmax(0,1fr)_360px]",
+          isSessionListCollapsed
+            ? "xl:grid-cols-[84px_minmax(0,1fr)] 2xl:grid-cols-[84px_minmax(0,1fr)_360px]"
+            : null,
+        )}
+        data-testid="workspace-main-region"
+      >
         <SessionList
           sessions={sessions}
           activeId={activeId}
@@ -514,6 +640,10 @@ export function WorkspacePage() {
           error={listError}
           onCreate={handleCreateSession}
           onSelect={handleSelectSession}
+          onArchive={handleArchiveSession}
+          onDelete={handleDeleteSession}
+          isCollapsed={isSessionListCollapsed}
+          onToggleCollapse={() => setIsSessionListCollapsed((current) => !current)}
         />
         <ChatPanel
           session={activeSession}
@@ -533,9 +663,19 @@ export function WorkspacePage() {
           onRemoveUpload={handleRemoveUpload}
           onSubmitTask={handleSubmitTask}
           renderTaskActions={renderTaskActions}
+          taskRoundNavigationById={taskRoundNavigationById}
+          focusedTaskId={focusedTaskId}
         />
+        <aside className="hidden min-h-0 overflow-y-auto pr-1 2xl:block" data-testid="workspace-detail-panel">
+          <DetailPanel
+            tasks={uiTasks}
+            queueLength={queueLength}
+            renderTaskActions={renderTaskActions}
+            taskRoundNavigationById={taskRoundNavigationById}
+            focusedTaskId={focusedTaskId}
+          />
+        </aside>
       </div>
-      <DetailPanel tasks={uiTasks} queueLength={queueLength} renderTaskActions={renderTaskActions} />
     </div>
   );
 }

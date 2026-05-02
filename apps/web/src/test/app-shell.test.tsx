@@ -21,6 +21,10 @@ type AuthState = {
 
 let authState: AuthState;
 
+const apiClientMock = vi.hoisted(() => ({
+  getHome: vi.fn(),
+}));
+
 function createAuthState(overrides: Partial<AuthState> = {}): AuthState {
   return {
     defaultRoute: "/",
@@ -46,6 +50,10 @@ function createAuthState(overrides: Partial<AuthState> = {}): AuthState {
 
 vi.mock("@/lib/auth", () => ({
   useAuth: () => authState,
+}));
+
+vi.mock("@/lib/api-client", () => ({
+  apiClient: apiClientMock,
 }));
 
 function LocationProbe() {
@@ -80,6 +88,7 @@ function renderShell({
           <Route path="create" element={<div>create-content</div>} />
           <Route path="history" element={<div>history-content</div>} />
           <Route path="library" element={<div>library-content</div>} />
+          <Route path="settings" element={<div>settings-content</div>} />
           <Route path="admin" element={<div>admin-content</div>} />
           <Route index element={<div>home-content</div>} />
         </Route>
@@ -93,6 +102,12 @@ function renderShell({
 describe("app shell", () => {
   beforeEach(() => {
     authState = createAuthState();
+    apiClientMock.getHome.mockResolvedValue({
+      recentConversations: [{ id: "conv_recent", title: "最近工作台", updatedAt: "2026-04-29T08:00:00.000Z" }],
+      recentTasks: [],
+      recentAssets: [],
+      recoveryTasks: [],
+    });
   });
 
   afterEach(() => {
@@ -104,9 +119,34 @@ describe("app shell", () => {
 
     expect(await screen.findByText("workspace-content")).toBeTruthy();
     expect(screen.getByRole("link", { name: "首页" }).getAttribute("href")).toBe("/");
+    expect(screen.getByRole("link", { name: "工作台" }).getAttribute("href")).toBe("/workspace/conv_123");
     expect(screen.getByRole("link", { name: "创建" }).getAttribute("href")).toBe("/create");
     expect(screen.getByRole("link", { name: "历史" }).getAttribute("href")).toBe("/history");
     expect(screen.getByRole("link", { name: "作品库" }).getAttribute("href")).toBe("/library");
+    expect(screen.getByRole("link", { name: "配置" }).getAttribute("href")).toBe("/settings");
+  });
+
+  it("links workspace nav to the most recent conversation outside workspace", async () => {
+    renderShell({ initialPath: "/create", mode: "user" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "工作台" }).getAttribute("href")).toBe("/workspace/conv_recent");
+    });
+  });
+
+  it("falls workspace nav back to create when there is no conversation", async () => {
+    apiClientMock.getHome.mockResolvedValue({
+      recentConversations: [],
+      recentTasks: [],
+      recentAssets: [],
+      recoveryTasks: [],
+    });
+
+    renderShell({ initialPath: "/create", mode: "user" });
+
+    await waitFor(() => {
+      expect(screen.getByRole("link", { name: "工作台" }).getAttribute("href")).toBe("/create");
+    });
   });
 
   it("lets an admin switch from user shell to admin route", async () => {

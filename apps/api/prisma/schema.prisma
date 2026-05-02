@@ -66,8 +66,23 @@ model User {
   messages          Message[]
   assets            Asset[]
   tasks             Task[]
+  settings          UserSettings?
 
   @@map("users")
+}
+
+model UserSettings {
+  id              String   @id @default(cuid())
+  userId          String   @unique @map("user_id")
+  baseUrl         String   @map("base_url")
+  providerApiKey  String?  @map("provider_api_key")
+  enabledModelIds Json     @map("enabled_model_ids")
+  ui              Json?
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_settings")
 }
 
 model Conversation {
@@ -201,4 +216,12 @@ model ProviderOperationalState {
   updatedAt            DateTime    @updatedAt @map("updated_at")
 
   @@map("provider_operational_state")
+}
+
+model ProviderConfiguration {
+  id        String   @id
+  baseUrl   String   @map("base_url")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("provider_configuration")
 }

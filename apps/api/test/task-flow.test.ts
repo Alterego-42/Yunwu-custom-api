@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, NotFoundException } from "@nestjs/common";
 import { ApiService } from "../src/api/api.service";
+import { ProviderConfigurationService } from "../src/openai-compatible/provider-configuration.service";
+import {
+  DEFAULT_YUNWU_MODEL_IDS,
+  YUNWU_MODEL_DEFINITIONS,
+  getYunwuModelDefinition,
+} from "../src/openai-compatible/yunwu-model-registry";
 
 const NOW = new Date("2026-04-24T08:00:00.000Z");
 
@@ -87,6 +93,25 @@ function buildTask(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function buildModelCapability(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "cap-1",
+    provider: "openai-compatible",
+    model: "gpt-image-2",
+    modality: "image",
+    capabilities: ["image.generate", "image.edit"],
+    enabled: true,
+    metadata: {
+      name: "GPT Image 2",
+      type: "image-editing",
+      taskSupported: true,
+    },
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
 function createHarness(
   overrides: Record<string, Record<string, (...args: any[]) => any>> = {},
 ) {
@@ -101,23 +126,29 @@ function createHarness(
     taskFindMany: [] as Array<Record<string, unknown>>,
     enqueued: [] as Array<{ taskId: string; source?: string }>,
     published: [] as Array<Record<string, unknown>>,
+    modelCapabilityUpsert: [] as Array<Record<string, unknown>>,
+    userSettingsPersist: [] as Array<unknown>,
   };
 
   const prisma: any = {
     modelCapability: {
       findMany: async () => [
-        {
-          id: "cap-1",
-          provider: "openai-compatible",
+        buildModelCapability(),
+        buildModelCapability({
+          id: "cap-legacy",
           model: "gpt-image-1",
-          modality: "image",
-          capabilities: ["image.generate", "image.edit"],
-          enabled: true,
-          metadata: { name: "GPT Image 1", type: "image-editing" },
-          createdAt: NOW,
-          updatedAt: NOW,
-        },
+          metadata: {
+            name: "GPT Image 1",
+            type: "image-editing",
+            taskSupported: true,
+          },
+        }),
       ],
+      findFirst: async () => buildModelCapability(),
+      upsert: async (args: Record<string, unknown>) => {
+        calls.modelCapabilityUpsert.push(args);
+        return args;
+      },
     },
     conversation: {
       findFirst: async () => null,
@@ -189,9 +220,18 @@ function createHarness(
   prisma.$transaction = async (
     callback: (tx: typeof prisma) => Promise<unknown>,
   ) => callback(prisma);
+  prisma.$queryRaw = async () => [];
+  prisma.$executeRaw = async (query: unknown) => {
+    calls.userSettingsPersist.push(query);
+    return 1;
+  };
 
   for (const [section, methods] of Object.entries(overrides)) {
-    Object.assign(prisma[section], methods);
+    if (section === "raw") {
+      Object.assign(prisma, methods);
+    } else {
+      Object.assign(prisma[section], methods);
+    }
   }
 
   const taskQueue = {
@@ -226,6 +266,10 @@ function createHarness(
     refreshAlerts: async <T>(value: T) => value,
     acknowledgeAlert: async () => null,
   };
+  const providerConfig = {
+    updateBaseUrl: async () => ({ baseUrl: "https://yunwu.ai" }),
+    getBaseUrl: async () => "https://yunwu.ai",
+  };
 
   const service = new ApiService(
     prisma,
@@ -233,12 +277,500 @@ function createHarness(
     taskEvents as any,
     conversationEvents as any,
     openaiCompatible as any,
+    providerConfig as any,
     providerState as any,
     providerAlerts as any,
   );
 
   return { service, calls };
 }
+
+test("onModuleInit registers Yunwu models with only the five requested defaults enabled", async () => {
+  const { service, calls } = createHarness();
+
+  await service.onModuleInit();
+
+  const creates = calls.modelCapabilityUpsert.map(
+    (call) => call.create as Record<string, any>,
+  );
+  const enabledModels = creates
+    .filter((create) => create.enabled)
+    .map((create) => create.model)
+    .sort();
+
+  assert.deepEqual(enabledModels, [
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "gpt-image-2",
+    "grok-4.2-image",
+    "grok-imagine-image-pro",
+  ].sort());
+  assert.ok(creates.some((create) => create.model === "flux-schnell"));
+  assert.equal(
+    creates.find((create) => create.model === "flux-schnell")?.enabled,
+    false,
+  );
+});
+
+test("Yunwu model registry includes all GPT, Gemini, and Grok image models", () => {
+  const requiredModelIds = [
+    "gpt-image-2",
+    "gpt-image-1.5",
+    "gpt-image-1.5-all",
+    "gpt-image-2-all",
+    "gpt-image-1",
+    "gpt-image-1-all",
+    "gpt-image-1-mini",
+    "gpt-4o-image-vip",
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "gemini-2.5-flash-image",
+    "gemini-2.5-flash-image-preview",
+    "grok-imagine-image",
+    "grok-imagine-image-pro",
+    "grok-4.2-image",
+    "grok-4.1-image",
+    "grok-4-image",
+    "grok-3-image",
+  ];
+
+  assert.deepEqual(DEFAULT_YUNWU_MODEL_IDS, [
+    "gpt-image-2",
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "grok-4.2-image",
+    "grok-imagine-image-pro",
+  ]);
+  assert.ok(
+    requiredModelIds.every((modelId) =>
+      YUNWU_MODEL_DEFINITIONS.some((model) => model.id === modelId),
+    ),
+  );
+  assert.equal(
+    YUNWU_MODEL_DEFINITIONS.filter((model) => model.defaultEnabled).length,
+    5,
+  );
+  assert.equal(
+    getYunwuModelDefinition("gpt-image-2")?.capabilities.includes("image.edit"),
+    true,
+  );
+  assert.equal(
+    getYunwuModelDefinition("grok-3-image")?.capabilities.includes("image.edit"),
+    true,
+  );
+  assert.equal(
+    getYunwuModelDefinition("grok-4.2-image")?.capabilities.includes("image.edit"),
+    true,
+  );
+  assert.equal(
+    getYunwuModelDefinition("gemini-3-pro-image-preview")?.capabilities.includes("image.edit"),
+    true,
+  );
+  assert.equal(
+    getYunwuModelDefinition("gemini-2.5-flash-image")?.capabilities.includes("image.edit"),
+    true,
+  );
+  assert.equal(
+    getYunwuModelDefinition("gpt-4o-image-vip")?.capabilities.includes("image.edit"),
+    false,
+  );
+});
+
+test("getSettings returns user defaults from global base URL", async () => {
+  const { service } = createHarness();
+
+  const response = await service.getSettings(buildUser() as any);
+
+  assert.equal(response.settings.baseUrl, "https://yunwu.ai");
+  assert.deepEqual(response.settings.enabledModelIds.sort(), [
+    "gemini-3-pro-image-preview",
+    "gemini-3.1-flash-image-preview",
+    "gpt-image-2",
+    "grok-4.2-image",
+    "grok-imagine-image-pro",
+  ].sort());
+  assert.deepEqual(response.settings.ui, {});
+});
+
+test("getSettings masks provider API key and updateSettings can set and clear it", async () => {
+  let storedApiKey = "sk-test-secret-123456";
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://yunwu.ai",
+          providerApiKey: storedApiKey,
+          enabledModelIds: ["gpt-image-2"],
+          ui: {},
+        },
+      ],
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        storedApiKey = String(query.values?.[3] ?? "");
+        return 1;
+      },
+    },
+  });
+
+  const response = await service.getSettings(buildUser() as any);
+
+  assert.equal(response.settings.providerApiKey.configured, true);
+  assert.notEqual(response.settings.providerApiKey.maskedApiKey, storedApiKey);
+  assert.match(response.settings.providerApiKey.maskedApiKey ?? "", /\.\.\./);
+
+  const updated = await service.updateSettings(buildUser() as any, {
+    apiKey: "sk-new-secret-abcdef",
+  });
+  assert.equal(updated.settings.providerApiKey.configured, true);
+
+  const cleared = await service.updateSettings(buildUser() as any, {
+    clearApiKey: true,
+  });
+  assert.equal(cleared.settings.providerApiKey.configured, false);
+});
+
+test("checkUserApiKey uses the provided key and masks the response", async () => {
+  let captured: Record<string, unknown> | undefined;
+  const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://api3.wlai.vip",
+          providerApiKey: null,
+          enabledModelIds: ["gpt-image-2"],
+          ui: {},
+        },
+      ],
+    },
+  });
+  (service as any).openaiCompatible = {
+    checkProviderModels: async (input: Record<string, unknown>) => {
+      captured = input;
+      return {
+        baseUrlReachable: true,
+        modelsSource: "configured",
+      };
+    },
+  };
+
+  const response = await service.checkUserApiKey(buildUser() as any, {
+    apiKey: "sk-check-secret-123456",
+  });
+
+  assert.equal(captured?.baseUrl, "https://api3.wlai.vip");
+  assert.equal(captured?.apiKey, "sk-check-secret-123456");
+  assert.equal(calls.userSettingsPersist.length, 0);
+  assert.equal(response.ok, true);
+  assert.equal(response.status, "ok");
+  assert.equal(response.message, "API key connectivity check succeeded.");
+  assert.equal(response.apiKey.configured, true);
+  assert.notEqual(response.apiKey.maskedApiKey, "sk-check-secret-123456");
+  assert.equal(response.check.baseUrlReachable, true);
+});
+
+test("checkUserApiKey uses the saved key when no temporary key is provided", async () => {
+  let captured: Record<string, unknown> | undefined;
+  const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://yunwu.ai",
+          providerApiKey: "sk-saved-secret-abcdef",
+          enabledModelIds: ["gpt-image-2"],
+          ui: {},
+        },
+      ],
+    },
+  });
+  (service as any).openaiCompatible = {
+    checkProviderModels: async (input: Record<string, unknown>) => {
+      captured = input;
+      return {
+        baseUrlReachable: true,
+        modelsSource: "remote",
+        remoteModelIds: ["gpt-image-2"],
+      };
+    },
+  };
+
+  const response = await service.checkUserApiKey(buildUser() as any, {});
+
+  assert.equal(captured?.baseUrl, "https://yunwu.ai");
+  assert.equal(captured?.apiKey, "sk-saved-secret-abcdef");
+  assert.equal(calls.userSettingsPersist.length, 0);
+  assert.equal(response.ok, true);
+  assert.equal(response.apiKey.configured, true);
+  assert.notEqual(response.apiKey.maskedApiKey, "sk-saved-secret-abcdef");
+  assert.equal(response.check.modelsSource, "remote");
+  assert.equal(response.check.availableModelCount, 1);
+});
+
+test("checkUserApiKey returns an explicit failure when no key is available", async () => {
+  let checkCalled = false;
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://api3.wlai.vip",
+          providerApiKey: null,
+          enabledModelIds: ["gpt-image-2"],
+          ui: {},
+        },
+      ],
+    },
+  });
+  (service as any).openaiCompatible = {
+    checkProviderModels: async () => {
+      checkCalled = true;
+      throw new Error("should not probe without a user API key");
+    },
+  };
+
+  const response = await service.checkUserApiKey(buildUser() as any, {});
+
+  assert.equal(checkCalled, false);
+  assert.equal(response.ok, false);
+  assert.equal(response.status, "error");
+  assert.equal(response.apiKey.configured, false);
+  assert.equal(response.apiKey.maskedApiKey, undefined);
+  assert.equal(response.check.baseUrlReachable, false);
+  assert.equal(response.check.modelsSource, "unavailable");
+  assert.equal(response.check.error?.category, "missing_api_key");
+  assert.match(response.message, /No API key is configured/);
+});
+
+test("checkUserApiKey does not leak invalid keys in failed check responses", async () => {
+  const rawKey = "sk-invalid-secret-1234567890";
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://yunwu.ai",
+          providerApiKey: null,
+          enabledModelIds: ["gpt-image-2"],
+          ui: {},
+        },
+      ],
+    },
+  });
+  (service as any).openaiCompatible = {
+    checkProviderModels: async () => ({
+      baseUrlReachable: true,
+      modelsSource: "unavailable",
+      error: {
+        category: "provider_auth",
+        message: "Provider rejected [redacted-api-key].",
+        retryable: false,
+        statusCode: 401,
+      },
+    }),
+  };
+
+  const response = await service.checkUserApiKey(buildUser() as any, {
+    apiKey: rawKey,
+  });
+  const serialized = JSON.stringify(response);
+
+  assert.equal(response.ok, false);
+  assert.equal(response.status, "error");
+  assert.equal(response.check.error?.statusCode, 401);
+  assert.doesNotMatch(serialized, new RegExp(rawKey));
+  assert.match(response.apiKey.maskedApiKey ?? "", /^.{4}\.\.\..{4}$/);
+});
+
+test("updateSettings persists user baseUrl, enabled models, and ui payload", async () => {
+  let persistedValues: unknown[] = [];
+  const { service } = createHarness({
+    raw: {
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        persistedValues = query.values ?? [];
+        return 1;
+      },
+    },
+  });
+
+  const response = await service.updateSettings(buildUser() as any, {
+    baseUrl: "https://api3.wlai.vip/",
+    enabledModelIds: ["gpt-image-1"],
+    ui: { density: "compact" },
+  });
+
+  assert.equal(response.settings.baseUrl, "https://api3.wlai.vip");
+  assert.ok(response.settings.enabledModelIds.includes("gpt-image-1"));
+  assert.ok(response.settings.enabledModelIds.includes("gpt-image-2"));
+  assert.deepEqual(response.settings.ui, { density: "compact" });
+  assert.ok(persistedValues.includes("https://api3.wlai.vip"));
+});
+
+test("updateSettings rejects unsupported baseUrl and unknown models", async () => {
+  const { service } = createHarness();
+
+  await assert.rejects(
+    () =>
+      service.updateSettings(buildUser() as any, {
+        baseUrl: "https://example.com",
+      }),
+    (error: unknown) => {
+      assert(error instanceof BadRequestException);
+      assert.match((error as Error).message, /Unsupported Yunwu base_url/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    () =>
+      service.updateSettings(buildUser() as any, {
+        enabledModelIds: ["unknown-model"],
+      }),
+    (error: unknown) => {
+      assert(error instanceof BadRequestException);
+      assert.match((error as Error).message, /Unknown Yunwu model id/);
+      return true;
+    },
+  );
+});
+
+test("getModels follows user enabledModelIds and marks unsupported families", async () => {
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://api3.wlai.vip",
+          enabledModelIds: [
+            "gpt-image-2",
+            "gpt-image-1",
+            "black-forest-labs/flux-kontext-dev",
+          ],
+          ui: {},
+        },
+      ],
+    },
+    modelCapability: {
+      findMany: async () => [
+        buildModelCapability({
+          id: "cap-default",
+          model: "gpt-image-2",
+          enabled: true,
+          metadata: { name: "GPT Image 2", taskSupported: true },
+        }),
+        buildModelCapability({
+          id: "cap-manual",
+          model: "gpt-image-1",
+          enabled: true,
+          metadata: { name: "GPT Image 1", taskSupported: true },
+        }),
+        buildModelCapability({
+          id: "cap-async",
+          model: "black-forest-labs/flux-kontext-dev",
+          enabled: true,
+          metadata: {
+            name: "Flux Kontext Dev",
+            family: "replicate-prediction",
+            taskSupported: false,
+          },
+        }),
+      ],
+    },
+  });
+
+  const response = await service.getModels(buildUser() as any);
+
+  assert.deepEqual(
+    response.models.map((model) => model.id).sort(),
+    ["black-forest-labs/flux-kontext-dev", "gpt-image-1", "gpt-image-2"],
+  );
+  assert.equal(
+    response.models.find((model) => model.id === "black-forest-labs/flux-kontext-dev")
+      ?.taskSupported,
+    false,
+  );
+  assert.equal(
+    response.models.find((model) => model.id === "black-forest-labs/flux-kontext-dev")
+      ?.status,
+    "unsupported",
+  );
+});
+
+test("createTask rejects enabled models whose Yunwu API family is not implemented", async () => {
+  const user = buildUser();
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://yunwu.ai",
+          enabledModelIds: ["black-forest-labs/flux-kontext-dev"],
+          ui: {},
+        },
+      ],
+    },
+    modelCapability: {
+      findMany: async () => [
+        buildModelCapability({
+          model: "black-forest-labs/flux-kontext-dev",
+          enabled: true,
+          capabilities: ["image.generate"],
+          metadata: {
+            family: "replicate-prediction",
+            taskSupported: false,
+          },
+        }),
+      ],
+      findFirst: async () =>
+        buildModelCapability({
+          model: "black-forest-labs/flux-kontext-dev",
+          enabled: true,
+          capabilities: ["image.generate"],
+          metadata: {
+            family: "replicate-prediction",
+            taskSupported: false,
+          },
+        }),
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        capability: "image.generate",
+        model: "black-forest-labs/flux-kontext-dev",
+        prompt: "Draw a mountain",
+      }),
+    (error: unknown) => {
+      assert(error instanceof BadRequestException);
+      assert.match((error as Error).message, /does not support its Yunwu API family/i);
+      return true;
+    },
+  );
+});
+
+test("ProviderConfigurationService reads the default base URL and persists supported switches", async () => {
+  let persisted: string | undefined;
+  const prisma = {
+    $queryRaw: async () =>
+      persisted ? [{ baseUrl: persisted }] : [],
+    $executeRaw: async (query: unknown) => {
+      persisted = String((query as { values?: unknown[] }).values?.[1]);
+      return 1;
+    },
+  };
+  const config = {
+    get: (key: string) =>
+      key === "yunwu.baseUrl" ? "https://api3.wlai.vip/" : undefined,
+  };
+  const service = new ProviderConfigurationService(prisma as any, config as any);
+
+  assert.equal(await service.getBaseUrl(), "https://api3.wlai.vip");
+  await service.updateBaseUrl("https://yunwu.ai/");
+  assert.equal(await service.getBaseUrl(), "https://yunwu.ai");
+
+  await assert.rejects(
+    () => service.updateBaseUrl("https://example.com"),
+    (error: unknown) => {
+      assert(error instanceof BadRequestException);
+      assert.match((error as Error).message, /Unsupported Yunwu base_url/);
+      return true;
+    },
+  );
+});
 
 test("createTask lazily creates a conversation and queues the task", async () => {
   const user = buildUser();
@@ -247,6 +779,15 @@ test("createTask lazily creates a conversation and queues the task", async () =>
   let createdTaskInput: Record<string, unknown> | undefined;
 
   const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://api3.wlai.vip",
+          enabledModelIds: ["gpt-image-1"],
+          ui: {},
+        },
+      ],
+    },
     conversation: {
       create: async ({ data }: { data: Record<string, unknown> }) => {
         calls.conversationCreate.push(data);
@@ -315,6 +856,10 @@ test("createTask lazily creates a conversation and queues the task", async () =>
     (calls.taskCreate[0]?.input as Record<string, unknown>).assetIds,
     [upload.id],
   );
+  assert.equal(
+    (calls.taskCreate[0]?.input as Record<string, unknown>).providerBaseUrl,
+    "https://api3.wlai.vip",
+  );
   assert.equal(response.conversation.id, lazyConversation.id);
   assert.equal(response.task.conversationId, lazyConversation.id);
   assert.deepEqual(response.task.assetIds, [upload.id]);
@@ -340,6 +885,15 @@ test("createTask forks into a new conversation and preserves source chain", asyn
   let createdTaskInput: Record<string, unknown> | undefined;
 
   const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://yunwu.ai",
+          enabledModelIds: ["gpt-image-1"],
+          ui: {},
+        },
+      ],
+    },
     task: {
       findFirst: async ({ where }: { where: { id?: string } }) =>
         where.id === sourceTask.id ? sourceTask : null,
@@ -436,7 +990,7 @@ test("createTask forks into a new conversation and preserves source chain", asyn
   assert.deepEqual(response.task.assetIds, [sourceAsset.id]);
 });
 
-test("retryFailedTask only allows retryable failures and writes retry source chain", async () => {
+test("retryTask retries failed tasks and writes retry source chain", async () => {
   const user = buildUser();
   const conversation = buildConversation({ id: "conv-retry" });
   const failedTask = buildTask({
@@ -486,7 +1040,7 @@ test("retryFailedTask only allows retryable failures and writes retry source cha
     },
   });
 
-  const response = await service.retryFailedTask(user as any, failedTask.id);
+  const response = await service.retryTask(user as any, failedTask.id);
 
   assert.equal(calls.taskCreate[0]?.sourceTaskId, failedTask.id);
   assert.equal(calls.taskCreate[0]?.sourceAction, "retry");
@@ -497,7 +1051,75 @@ test("retryFailedTask only allows retryable failures and writes retry source cha
   assert.equal(response.task.canRetry, false);
 });
 
-test("retryFailedTask rejects non-retryable content failures", async () => {
+test("retryTask retries succeeded tasks by copying original input", async () => {
+  const user = buildUser();
+  const conversation = buildConversation({ id: "conv-success-retry" });
+  const succeededTask = buildTask({
+    id: "task-succeeded",
+    status: "succeeded",
+    conversationId: conversation.id,
+    conversation,
+    type: "image.edit",
+    input: {
+      model: "gpt-image-2",
+      prompt: "Retouch the product photo",
+      assetIds: ["asset-input-1"],
+      params: { size: "1024x1024", quality: "high" },
+      providerBaseUrl: "https://api3.wlai.vip",
+    },
+    output: {
+      assetIds: ["generated-1"],
+    },
+    assets: [buildAsset({ id: "generated-1", type: "generated" })],
+  });
+
+  const { service, calls } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === succeededTask.id ? succeededTask : null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskCreate.push(data);
+        return buildTask({
+          id: "task-retried-success",
+          ...data,
+          conversation,
+          assets: [],
+          events: [],
+        });
+      },
+      findUniqueOrThrow: async () =>
+        buildTask({
+          id: "task-retried-success",
+          conversationId: conversation.id,
+          sourceTaskId: succeededTask.id,
+          sourceAction: "retry",
+          type: "image.edit",
+          status: "queued",
+          conversation,
+          assets: [],
+          events: [],
+          input: succeededTask.input,
+        }),
+    },
+  });
+
+  const response = await service.retryTask(user as any, succeededTask.id);
+
+  assert.equal(calls.taskCreate[0]?.userId, user.id);
+  assert.equal(calls.taskCreate[0]?.conversationId, conversation.id);
+  assert.equal(calls.taskCreate[0]?.sourceTaskId, succeededTask.id);
+  assert.equal(calls.taskCreate[0]?.sourceAction, "retry");
+  assert.equal(calls.taskCreate[0]?.type, "image.edit");
+  assert.deepEqual(calls.taskCreate[0]?.input, succeededTask.input);
+  assert.deepEqual(calls.enqueued, [
+    { taskId: "task-retried-success", source: "user-retry" },
+  ]);
+  assert.equal(response.retriedFromTaskId, succeededTask.id);
+  assert.equal(response.task.sourceTaskId, succeededTask.id);
+  assert.equal(response.task.sourceAction, "retry");
+});
+
+test("retryTask retries failed tasks even when failure details are non-retryable", async () => {
   const user = buildUser();
   const failedTask = buildTask({
     id: "task-invalid",
@@ -516,24 +1138,152 @@ test("retryFailedTask rejects non-retryable content failures", async () => {
     errorMessage: "Prompt violates content policy.",
   });
 
-  const { service } = createHarness({
+  const { service, calls } = createHarness({
     task: {
       findFirst: async ({ where }: { where: { id?: string } }) =>
         where.id === failedTask.id ? failedTask : null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskCreate.push(data);
+        return buildTask({
+          id: "task-invalid-retry",
+          ...data,
+          assets: [],
+          events: [],
+        });
+      },
+      findUniqueOrThrow: async () =>
+        buildTask({
+          id: "task-invalid-retry",
+          conversationId: failedTask.conversationId,
+          sourceTaskId: failedTask.id,
+          sourceAction: "retry",
+          status: "queued",
+          assets: [],
+          events: [],
+          input: failedTask.input,
+        }),
+    },
+  });
+
+  const response = await service.retryTask(user as any, failedTask.id);
+
+  assert.equal(calls.taskCreate[0]?.sourceTaskId, failedTask.id);
+  assert.equal(response.retriedFromTaskId, failedTask.id);
+});
+
+test("retryTask rejects in-progress tasks with a user-readable error", async () => {
+  const user = buildUser();
+  const runningTask = buildTask({
+    id: "task-running",
+    status: "running",
+    conversationId: "conv-running",
+  });
+  const { service, calls } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === runningTask.id ? runningTask : null,
     },
   });
 
   await assert.rejects(
-    () => service.retryFailedTask(user as any, failedTask.id),
+    () => service.retryTask(user as any, runningTask.id),
     (error: unknown) => {
       assert(error instanceof BadRequestException);
       assert.match(
         (error as Error).message,
-        /retryable failed tasks can be retried from the client/i,
+        /still in progress and cannot be retried yet/i,
       );
       return true;
     },
   );
+  assert.equal(calls.taskCreate.length, 0);
+});
+
+test("retryTask keeps member retry access isolated to owned tasks", async () => {
+  const ownerTask = buildTask({
+    id: "task-owned-by-other",
+    userId: "user-2",
+    status: "succeeded",
+  });
+  const { service, calls } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string; userId?: string } }) =>
+        where.id === ownerTask.id &&
+        (!where.userId || where.userId === ownerTask.userId)
+          ? ownerTask
+          : null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskCreate.push(data);
+        return buildTask({
+          id: "task-admin-retry",
+          ...data,
+          assets: [],
+          events: [],
+        });
+      },
+      findUniqueOrThrow: async () =>
+        buildTask({
+          id: "task-admin-retry",
+          userId: ownerTask.userId,
+          conversationId: ownerTask.conversationId,
+          sourceTaskId: ownerTask.id,
+          sourceAction: "retry",
+          status: "queued",
+          assets: [],
+          events: [],
+          input: ownerTask.input,
+        }),
+    },
+  });
+
+  await assert.rejects(
+    () => service.retryTask(buildUser({ id: "user-1" }) as any, ownerTask.id),
+    (error: unknown) => {
+      assert(error instanceof NotFoundException);
+      assert.match((error as Error).message, /Task not found/);
+      return true;
+    },
+  );
+  assert.equal(calls.taskCreate.length, 0);
+
+  const adminResponse = await service.retryTask(
+    buildUser({ id: "admin-1", role: "admin" }) as any,
+    ownerTask.id,
+  );
+
+  assert.equal(calls.taskCreate[0]?.userId, ownerTask.userId);
+  assert.equal(adminResponse.retriedFromTaskId, ownerTask.id);
+});
+
+test("archiveConversation and deleteConversation only mutate owned conversations", async () => {
+  const owner = buildUser();
+  const outsider = buildUser({ id: "user-2" });
+  const conversation = buildConversation({ id: "conv-mut", userId: owner.id });
+  let updatedStatus: string | undefined;
+
+  const { service } = createHarness({
+    conversation: {
+      findFirst: async ({ where }: { where: { id?: string; userId?: string } }) =>
+        where.id === conversation.id &&
+        (!where.userId || where.userId === owner.id)
+          ? conversation
+          : null,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        updatedStatus = String(data.status);
+        return buildConversation({
+          ...conversation,
+          status: data.status,
+          metadata: data.metadata ?? null,
+        });
+      },
+    },
+  });
+
+  await assert.rejects(() => service.archiveConversation(outsider as any, conversation.id));
+  await service.archiveConversation(owner as any, conversation.id);
+  assert.equal(updatedStatus, "archived");
+  await service.deleteConversation(owner as any, conversation.id);
+  assert.equal(updatedStatus, "deleted");
 });
 
 test("getTask exposes refill fields and structured failure details", async () => {
@@ -590,7 +1340,7 @@ test("getTask exposes refill fields and structured failure details", async () =>
     detail: "Mask area is empty.",
     statusCode: 400,
   });
-  assert.equal(response.task.canRetry, false);
+  assert.equal(response.task.canRetry, true);
 });
 
 test("home/library exclude deleted assets while history still preserves deleted outputs", async () => {
@@ -715,16 +1465,19 @@ test("home/library exclude deleted assets while history still preserves deleted 
   assert.equal(home.recentAssets.length, 1);
   assert.equal(home.recoveryTasks[0]?.canRetry, true);
   assert.equal(
-    calls.assetFindMany[0]?.where?.status?.not,
+    (calls.assetFindMany[0] as any)?.where?.status?.not,
     "deleted",
   );
 
-  const deleted = await service.deleteLibraryAsset(user as any, libraryAssetState.id);
-  assert.equal(deleted.asset.id, libraryAssetState.id);
+  const deleted = await service.deleteLibraryAsset(
+    user as any,
+    (libraryAssetState as any).id,
+  );
+  assert.equal(deleted.asset.id, (libraryAssetState as any).id);
   assert.equal(calls.assetUpdate.length, 1);
-  assert.equal(calls.assetUpdate[0]?.data?.status, "deleted");
+  assert.equal((calls.assetUpdate[0] as any)?.data?.status, "deleted");
   assert.match(
-    String(calls.assetUpdate[0]?.data?.metadata?.deletedAt ?? ""),
+    String((calls.assetUpdate[0] as any)?.data?.metadata?.deletedAt ?? ""),
     /^\d{4}-\d{2}-\d{2}T/,
   );
 

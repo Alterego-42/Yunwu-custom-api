@@ -105,6 +105,40 @@ export type DeleteLibraryAssetResponse = {
   asset: AssetRecord;
 };
 
+export type ConversationMutationResponse = {
+  conversation?: ConversationSummary;
+};
+
+export type ApiKeyStatus = {
+  configured: boolean;
+  masked?: string | null;
+  lastVerifiedAt?: string | null;
+};
+
+export type ApiKeyMutationResponse = {
+  apiKey?: ApiKeyStatus;
+  providerApiKey?: {
+    configured?: boolean;
+    maskedApiKey?: string | null;
+  };
+  check?: {
+    baseUrlReachable?: boolean;
+    modelsSource?: string;
+    error?: {
+      category?: string;
+      message?: string;
+      retryable?: boolean;
+      statusCode?: number;
+    };
+  };
+  status?: ApiKeyStatus | string;
+  configured?: boolean;
+  masked?: string | null;
+  maskedApiKey?: string | null;
+  ok?: boolean;
+  message?: string;
+};
+
 export type TaskEventRecord = {
   id: string;
   taskId: string;
@@ -252,6 +286,22 @@ export type AdminProviderTestGenerateResult = {
   completedAt?: string;
 };
 
+export type AdminLogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR" | (string & {});
+
+export type AdminLogRecord = {
+  id: string;
+  timestamp: string;
+  level: AdminLogLevel;
+  context: string;
+  message: string;
+  trace?: string | Record<string, unknown> | null;
+};
+
+export type AdminLogsResponse = {
+  logs: AdminLogRecord[];
+  total?: number;
+};
+
 export type UiTaskAsset = {
   id: string;
   type: AssetRecord["type"];
@@ -289,6 +339,16 @@ export type UiTask = {
   sourceAction?: TaskSourceAction;
   outputSummary?: Record<string, unknown>;
   inputSummary?: Record<string, unknown>;
+};
+
+export type UiTaskRoundNavigation = {
+  scope: "retry";
+  groupId: string;
+  taskIds: string[];
+  index: number;
+  total: number;
+  previousTaskId?: string;
+  nextTaskId?: string;
 };
 
 export type UiImageResult = {

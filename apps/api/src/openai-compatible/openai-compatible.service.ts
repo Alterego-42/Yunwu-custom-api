@@ -9,11 +9,15 @@ import { createHash, createHmac } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { cwd } from "node:process";
+import { ProviderConfigurationService } from "./provider-configuration.service";
 
 export interface OpenAICompatibleImageRequest {
   model: string;
   prompt: string;
   capability: "image.generate" | "image.edit";
+  baseUrl?: string;
+  apiKey?: string;
+  allowMock?: boolean;
   inputAssets?: OpenAICompatibleInputAsset[];
   params?: Record<string, unknown>;
 }
@@ -59,6 +63,29 @@ interface S3ReadConfig {
   forcePathStyle: boolean;
 }
 
+interface ExtractedImageResult {
+  url?: string;
+  b64_json?: string;
+  mimeType?: string;
+}
+
+const RESERVED_IMAGE_REQUEST_PARAM_KEYS = new Set([
+  "model",
+  "prompt",
+  "image",
+  "images",
+  "image_url",
+  "image_urls",
+  "assetId",
+  "assetIds",
+  "inputAssets",
+  "baseUrl",
+  "providerBaseUrl",
+]);
+
+export const PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE =
+  "Provider API key is not configured; real image generation is unavailable.";
+
 export class OpenAICompatibleRequestError extends Error {
   constructor(
     message: string,
@@ -71,24 +98,27 @@ export class OpenAICompatibleRequestError extends Error {
 
 @Injectable()
 export class OpenAICompatibleService {
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    private readonly providerConfig: ProviderConfigurationService,
+  ) {}
 
-  getProviderProfile(): OpenAICompatibleProviderProfile {
+  async getProviderProfile(): Promise<OpenAICompatibleProviderProfile> {
     const apiKey = this.getApiKey();
 
     return {
       type: "openai-compatible",
       name:
         this.config.get<string>("yunwu.providerName") ?? "OpenAI-compatible",
-      baseUrl: this.getResolvedBaseUrl(),
+      baseUrl: await this.getResolvedBaseUrl(),
       apiKeyConfigured: Boolean(apiKey),
       ...(apiKey ? { maskedApiKey: this.maskSecret(apiKey) } : {}),
       mode: apiKey ? "real" : "mock",
     };
   }
 
-  getBaseConfig() {
-    const profile = this.getProviderProfile();
+  async getBaseConfig() {
+    const profile = await this.getProviderProfile();
 
     return {
       baseUrl: profile.baseUrl,
@@ -96,9 +126,12 @@ export class OpenAICompatibleService {
     };
   }
 
-  async checkProviderModels(): Promise<OpenAICompatibleProviderProbeResult> {
-    const baseUrl = this.getResolvedBaseUrl();
-    const apiKey = this.getApiKey();
+  async checkProviderModels(input?: {
+    baseUrl?: string;
+    apiKey?: string | null;
+  }): Promise<OpenAICompatibleProviderProbeResult> {
+    const baseUrl = await this.getResolvedBaseUrl(input?.baseUrl);
+    const apiKey = this.getApiKey(input?.apiKey);
     const baseProbe = await this.probeBaseUrl(baseUrl);
 
     if (!baseProbe.baseUrlReachable) {
@@ -115,7 +148,7 @@ export class OpenAICompatibleService {
         modelsSource: "configured",
         error: {
           category: "missing_api_key",
-          message: "Provider API key is not configured; mock mode is active.",
+          message: PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE,
           retryable: false,
         },
       };
@@ -130,21 +163,25 @@ export class OpenAICompatibleService {
   async createImageTask(
     request: OpenAICompatibleImageRequest,
   ): Promise<OpenAICompatibleImageResult> {
-    const apiKey = this.getApiKey();
+    const apiKey = this.getApiKey(request.apiKey);
 
     if (!apiKey) {
+      if (!(request.allowMock ?? this.allowMockImages())) {
+        throw new Error(PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE);
+      }
+
       return this.createMockImageResult(request);
     }
 
-    const baseUrl = this.getResolvedBaseUrl();
-    const endpointPath =
-      request.capability === "image.edit"
-        ? "/v1/images/edits"
-        : "/v1/images/generations";
+    const baseUrl = await this.getResolvedBaseUrl(request.baseUrl);
+    const usesGeminiImageEdit = this.isGeminiImageEditRequest(request);
+    const endpointPath = this.resolveImageEndpointPath(request);
     const endpoint = `${baseUrl}${endpointPath}`;
 
     const response =
-      request.capability === "image.edit"
+      usesGeminiImageEdit
+        ? await this.submitGeminiImageEditRequest(endpoint, apiKey, request)
+        : request.capability === "image.edit"
         ? await this.submitImageEditRequest(endpoint, apiKey, request)
         : await fetch(endpoint, {
             method: "POST",
@@ -153,16 +190,16 @@ export class OpenAICompatibleService {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
+              ...this.sanitizeImageRequestParams(request.params),
               model: request.model,
               prompt: request.prompt,
-              ...request.params,
             }),
           });
 
-    const payload = (await response.json().catch(() => ({}))) as {
-      data?: Array<{ url?: string; b64_json?: string }>;
-      error?: { message?: string };
-    };
+    const payload = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >;
     const responseSummary = this.toResponseSummary(
       "live",
       endpointPath,
@@ -171,21 +208,31 @@ export class OpenAICompatibleService {
     );
 
     if (!response.ok) {
+      const error = this.asRecord(payload.error);
+      const errorMessage = this.asString(error?.message);
+
       throw new OpenAICompatibleRequestError(
-        payload.error?.message ??
+        errorMessage ??
           `OpenAI-compatible image request failed with ${response.status}`,
         responseSummary,
       );
     }
 
-    const firstImage = payload.data?.[0];
+    const firstImage = this.extractImageResult(payload);
     if (!firstImage?.url && !firstImage?.b64_json) {
-      throw new Error("OpenAI-compatible image response did not include data.");
+      throw new OpenAICompatibleRequestError(
+        `OpenAI-compatible image response did not include data. Response shape: ${JSON.stringify(
+          responseSummary.shapeHints,
+        )}`,
+        responseSummary,
+      );
     }
 
     return {
-      url: firstImage.url ?? `data:image/png;base64,${firstImage.b64_json}`,
-      mimeType: "image/png",
+      url:
+        firstImage.url ??
+        `data:${firstImage.mimeType ?? "image/png"};base64,${firstImage.b64_json}`,
+      mimeType: firstImage.mimeType ?? "image/png",
       width: this.resolveImageDimension(request.params, "width") ?? 1024,
       height: this.resolveImageDimension(request.params, "height") ?? 1024,
       responseSummary,
@@ -202,7 +249,10 @@ export class OpenAICompatibleService {
 
     formData.append("model", request.model);
     formData.append("prompt", request.prompt);
-    this.appendFormDataParams(formData, request.params);
+    this.appendFormDataParams(
+      formData,
+      this.sanitizeImageRequestParams(request.params),
+    );
 
     const inputAssets = request.inputAssets ?? [];
     if (inputAssets.length === 0) {
@@ -222,6 +272,55 @@ export class OpenAICompatibleService {
         Authorization: `Bearer ${apiKey}`,
       },
       body: formData,
+    });
+  }
+
+  private async submitGeminiImageEditRequest(
+    endpoint: string,
+    apiKey: string,
+    request: OpenAICompatibleImageRequest,
+  ) {
+    const inputAssets = request.inputAssets ?? [];
+    if (inputAssets.length === 0) {
+      throw new Error("Gemini image edit requires at least one input asset.");
+    }
+
+    const imageFiles = await Promise.all(
+      inputAssets.map((asset, index) => this.loadInputAssetFile(asset, index)),
+    );
+    const imageContents = await Promise.all(
+      imageFiles.map(async (imageFile) => ({
+        type: "image_url",
+        image_url: {
+          url: await this.fileToDataUrl(imageFile),
+        },
+      })),
+    );
+
+    return fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ...this.sanitizeImageRequestParams(request.params),
+        model: request.model,
+        messages: [
+          {
+            role: "user",
+            // Yunwu Gemini image edit converts through Gemini multimodal chat;
+            // the Images multipart edit endpoint fails provider conversion.
+            content: [
+              {
+                type: "text",
+                text: request.prompt,
+              },
+              ...imageContents,
+            ],
+          },
+        ],
+      }),
     });
   }
 
@@ -313,10 +412,7 @@ export class OpenAICompatibleService {
       height: 1024,
       responseSummary: {
         mode: "mock",
-        endpointPath:
-          request.capability === "image.edit"
-            ? "/v1/images/edits"
-            : "/v1/images/generations",
+        endpointPath: this.resolveImageEndpointPath(request),
         statusCode: 200,
         mocked: true,
         resultCount: 1,
@@ -331,18 +427,21 @@ export class OpenAICompatibleService {
     mode: "live" | "mock",
     endpointPath: string,
     statusCode: number,
-    payload: { data?: Array<{ url?: string; b64_json?: string }>; error?: { message?: string } },
+    payload: Record<string, unknown>,
   ) {
-    const firstImage = payload.data?.[0];
+    const data = this.asRecordArray(payload.data);
+    const firstImage = this.extractImageResult(payload);
+    const error = this.asRecord(payload.error);
 
     return {
       mode,
       endpointPath,
       statusCode,
-      resultCount: payload.data?.length ?? 0,
+      resultCount: data?.length ?? (firstImage ? 1 : 0),
       hasUrl: Boolean(firstImage?.url),
       hasBase64: Boolean(firstImage?.b64_json),
-      errorMessage: payload.error?.message,
+      errorMessage: this.asString(error?.message),
+      shapeHints: firstImage ? undefined : this.buildResponseShapeHints(payload),
     };
   }
 
@@ -373,6 +472,21 @@ export class OpenAICompatibleService {
         formData.append(key, String(value));
       }
     }
+  }
+
+  private sanitizeImageRequestParams(params?: Record<string, unknown>) {
+    if (!params) {
+      return {};
+    }
+
+    return Object.fromEntries(
+      Object.entries(params).filter(
+        ([key, value]) =>
+          !RESERVED_IMAGE_REQUEST_PARAM_KEYS.has(key) &&
+          value !== undefined &&
+          value !== null,
+      ),
+    );
   }
 
   private async loadInputAssetFile(
@@ -413,6 +527,13 @@ export class OpenAICompatibleService {
     );
   }
 
+  private async fileToDataUrl(file: File) {
+    const bytes = Buffer.from(await file.arrayBuffer());
+    const mimeType = file.type || this.mimeTypeFromFileName(file.name);
+
+    return `data:${mimeType};base64,${bytes.toString("base64")}`;
+  }
+
   private async fetchRemoteFile(url: string, fileName: string) {
     const response = await fetch(url);
     if (!response.ok) {
@@ -451,16 +572,32 @@ export class OpenAICompatibleService {
     return isAbsolute(configured) ? resolve(configured) : join(cwd(), configured);
   }
 
-  private getApiKey() {
-    const apiKey = this.config.get<string>("yunwu.apiKey");
+  private getApiKey(override?: string | null) {
+    const apiKey =
+      override === undefined ? this.config.get<string>("yunwu.apiKey") : override;
     return apiKey?.trim() || undefined;
   }
 
-  private getResolvedBaseUrl() {
-    return (
-      this.config.get<string>("yunwu.baseUrl")?.replace(/\/$/, "") ??
-      "https://api.openai.com"
-    );
+  private allowMockImages() {
+    return this.config.get<boolean>("yunwu.allowMockImages") === true;
+  }
+
+  private getResolvedBaseUrl(baseUrlOverride?: string) {
+    const normalizedOverride = this.normalizeBaseUrl(baseUrlOverride);
+    if (normalizedOverride) {
+      return normalizedOverride;
+    }
+
+    return this.providerConfig.getBaseUrl();
+  }
+
+  private normalizeBaseUrl(baseUrl?: string) {
+    const normalized = baseUrl?.trim().replace(/\/+$/, "");
+    if (!normalized) {
+      return undefined;
+    }
+
+    return normalized.replace(/\/v1$/i, "");
   }
 
   private maskSecret(value: string) {
@@ -746,6 +883,341 @@ export class OpenAICompatibleService {
 
   private asNumber(value: unknown): number | undefined {
     return typeof value === "number" ? value : undefined;
+  }
+
+  private isGeminiImageEditRequest(request: OpenAICompatibleImageRequest) {
+    return request.capability === "image.edit" && request.model.startsWith("gemini-");
+  }
+
+  private resolveImageEndpointPath(request: OpenAICompatibleImageRequest) {
+    if (this.isGeminiImageEditRequest(request)) {
+      return "/v1/chat/completions";
+    }
+
+    return request.capability === "image.edit"
+      ? "/v1/images/edits"
+      : "/v1/images/generations";
+  }
+
+  private extractImageResult(payload: unknown): ExtractedImageResult | undefined {
+    const direct = this.extractImageFromValue(payload);
+    if (direct) {
+      return direct;
+    }
+
+    const record = this.asRecord(payload);
+    const choices = this.asRecordArray(record?.choices);
+    for (const choice of choices ?? []) {
+      const messageImage = this.extractImageFromValue(choice.message);
+      if (messageImage) {
+        return messageImage;
+      }
+
+      const deltaImage = this.extractImageFromValue(choice.delta);
+      if (deltaImage) {
+        return deltaImage;
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractImageFromValue(value: unknown): ExtractedImageResult | undefined {
+    if (typeof value === "string") {
+      return this.extractImageFromString(value);
+    }
+
+    const record = this.asRecord(value);
+    if (!record) {
+      return undefined;
+    }
+
+    const inlineData =
+      this.asRecord(record.inline_data) ?? this.asRecord(record.inlineData);
+    if (inlineData) {
+      const image = this.extractGeminiInlineData(inlineData);
+      if (image) {
+        return image;
+      }
+    }
+
+    const fileData =
+      this.asRecord(record.file_data) ?? this.asRecord(record.fileData);
+    if (fileData) {
+      const image = this.extractGeminiFileData(fileData);
+      if (image) {
+        return image;
+      }
+    }
+
+    const mimeType =
+      this.asString(record.mimeType) ??
+      this.asString(record.mime_type) ??
+      this.asString(record.type);
+    const url =
+      this.asString(record.url) ??
+      this.asString(record.uri) ??
+      this.asString(record.file_uri) ??
+      this.asString(record.fileUri) ??
+      this.asString(record.imageUrl) ??
+      this.extractImageUrlValue(record.image_url) ??
+      this.extractImageUrlValue(record.input_image) ??
+      this.extractImageUrlValue(record.output_image) ??
+      this.extractImageUrlValue(record.image);
+    const b64_json =
+      this.asString(record.b64_json) ??
+      this.asString(record.base64) ??
+      this.asImageBase64(record.data, mimeType);
+    const resolvedMimeType =
+      (mimeType?.startsWith("image/") ? mimeType : undefined) ??
+      this.extractDataUrlMimeType(url);
+    if (url || b64_json) {
+      return {
+        ...(url ? { url } : {}),
+        ...(b64_json ? { b64_json } : {}),
+        ...(resolvedMimeType ? { mimeType: resolvedMimeType } : {}),
+      };
+    }
+
+    const source = this.asRecord(record.source);
+    const sourceData = this.asString(source?.data);
+    if (sourceData) {
+      return {
+        b64_json: sourceData,
+        mimeType: this.asString(source?.media_type) ?? "image/png",
+      };
+    }
+
+    for (const key of ["data", "images", "content", "output", "parts"]) {
+      const image = this.extractImageFromArray(record[key]);
+      if (image) {
+        return image;
+      }
+
+      if (key !== "data") {
+        const nestedImage = this.extractImageFromValue(record[key]);
+        if (nestedImage) {
+          return nestedImage;
+        }
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractImageFromArray(value: unknown): ExtractedImageResult | undefined {
+    if (!Array.isArray(value)) {
+      return undefined;
+    }
+
+    for (const item of value) {
+      const image = this.extractImageFromValue(item);
+      if (image) {
+        return image;
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractImageUrlValue(value: unknown): string | undefined {
+    if (typeof value === "string") {
+      return value;
+    }
+
+    const record = this.asRecord(value);
+    if (!record) {
+      return undefined;
+    }
+
+    return (
+      this.asString(record.url) ??
+      this.asString(record.uri) ??
+      this.asString(record.file_uri) ??
+      this.asString(record.fileUri) ??
+      this.asString(record.imageUrl)
+    );
+  }
+
+  private extractImageFromString(value: string): ExtractedImageResult | undefined {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return undefined;
+    }
+
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return this.extractImageFromValue(JSON.parse(trimmed));
+      } catch {
+        return undefined;
+      }
+    }
+
+    const dataUrl = trimmed.match(
+      /data:image\/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=_-]+/i,
+    )?.[0];
+    if (dataUrl) {
+      return {
+        url: dataUrl,
+        mimeType: this.extractDataUrlMimeType(dataUrl),
+      };
+    }
+
+    const url = trimmed.match(/https?:\/\/[^\s"'<>),]+/i)?.[0];
+    return url ? { url } : undefined;
+  }
+
+  private extractGeminiInlineData(
+    record: Record<string, unknown>,
+  ): ExtractedImageResult | undefined {
+    const mimeType =
+      this.asString(record.mime_type) ?? this.asString(record.mimeType);
+    const data = this.asImageBase64(record.data, mimeType);
+
+    return data
+      ? {
+          b64_json: data,
+          mimeType: mimeType?.startsWith("image/") ? mimeType : "image/png",
+        }
+      : undefined;
+  }
+
+  private extractGeminiFileData(
+    record: Record<string, unknown>,
+  ): ExtractedImageResult | undefined {
+    const url =
+      this.asString(record.file_uri) ??
+      this.asString(record.fileUri) ??
+      this.asString(record.url) ??
+      this.asString(record.uri) ??
+      this.asString(record.imageUrl);
+    const mimeType =
+      this.asString(record.mime_type) ?? this.asString(record.mimeType);
+
+    return url
+      ? {
+          url,
+          ...(mimeType?.startsWith("image/") ? { mimeType } : {}),
+        }
+      : undefined;
+  }
+
+  private asImageBase64(
+    value: unknown,
+    mimeType?: string,
+  ): string | undefined {
+    const text = this.asString(value)?.trim();
+    if (!text) {
+      return undefined;
+    }
+
+    if (mimeType?.startsWith("image/")) {
+      return text;
+    }
+
+    if (
+      text.length >= 96 &&
+      text.length % 4 === 0 &&
+      /^[A-Za-z0-9+/]+={0,2}$/.test(text)
+    ) {
+      return text;
+    }
+
+    return undefined;
+  }
+
+  private extractDataUrlMimeType(value?: string) {
+    return value?.match(/^data:([^;,]+)[;,]/)?.[1];
+  }
+
+  private buildResponseShapeHints(payload: Record<string, unknown>) {
+    const choices = this.asRecordArray(payload.choices);
+    const firstChoice = choices?.[0];
+    const message = this.asRecord(firstChoice?.message);
+    const content = message?.content;
+    const output = Array.isArray(payload.output) ? payload.output : undefined;
+    const directContent = Array.isArray(payload.content)
+      ? payload.content
+      : undefined;
+
+    return {
+      topLevelKeys: Object.keys(payload).slice(0, 20),
+      choiceCount: choices?.length ?? 0,
+      firstChoiceKeys: firstChoice ? Object.keys(firstChoice).slice(0, 20) : [],
+      messageKeys: message ? Object.keys(message).slice(0, 20) : [],
+      messageContentType: this.describeValueType(content),
+      messageContentItemTypes: Array.isArray(content)
+        ? content.slice(0, 5).map((item) => this.describeContentItem(item))
+        : undefined,
+      hasMessageText:
+        typeof content === "string"
+          ? content.trim().length > 0
+          : Array.isArray(content)
+          ? content.some((item) => typeof this.asRecord(item)?.text === "string")
+          : false,
+      outputCount: output?.length ?? 0,
+      outputContentItemTypes: output
+        ?.slice(0, 3)
+        .map((item) => this.describeNestedContentTypes(item)),
+      contentItemTypes: directContent
+        ?.slice(0, 5)
+        .map((item) => this.describeContentItem(item)),
+    };
+  }
+
+  private describeNestedContentTypes(value: unknown) {
+    const record = this.asRecord(value);
+    const content = record?.content;
+    return {
+      keys: record ? Object.keys(record).slice(0, 20) : [],
+      contentType: this.describeValueType(content),
+      contentItemTypes: Array.isArray(content)
+        ? content.slice(0, 5).map((item) => this.describeContentItem(item))
+        : undefined,
+    };
+  }
+
+  private describeContentItem(value: unknown) {
+    const record = this.asRecord(value);
+    if (!record) {
+      return this.describeValueType(value);
+    }
+
+    return {
+      type: this.asString(record.type),
+      keys: Object.keys(record).slice(0, 20),
+      hasText: typeof record.text === "string" && record.text.length > 0,
+    };
+  }
+
+  private describeValueType(value: unknown) {
+    if (Array.isArray(value)) {
+      return "array";
+    }
+
+    if (value === null) {
+      return "null";
+    }
+
+    return typeof value;
+  }
+
+  private asRecord(value: unknown): Record<string, unknown> | undefined {
+    return value && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  }
+
+  private asRecordArray(value: unknown): Record<string, unknown>[] | undefined {
+    return Array.isArray(value)
+      ? value.filter((item): item is Record<string, unknown> =>
+          Boolean(this.asRecord(item)),
+        )
+      : undefined;
+  }
+
+  private asString(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
   }
 
   private sanitizeDisplayText(value: string, maxLength: number) {

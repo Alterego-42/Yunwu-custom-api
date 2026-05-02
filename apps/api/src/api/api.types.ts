@@ -1,4 +1,6 @@
 import type {
+  AppLogEntry,
+  AppLogsResponse,
   AssetRecord,
   CapabilityType,
   ConversationMetadata,
@@ -13,11 +15,15 @@ import type {
   ProviderModelSummary,
   ProviderTestGenerateResponse,
   ProviderWarning,
+  UserSettingsResponse,
+  UserApiKeyCheckResponse,
   TaskMessage,
   TaskRecord as SharedTaskRecord,
 } from "@yunwu/shared";
 
 export type {
+  AppLogEntry,
+  AppLogsResponse,
   AssetRecord,
   CapabilityType,
   ConversationMetadata,
@@ -32,12 +38,16 @@ export type {
   ProviderModelSummary,
   ProviderTestGenerateResponse,
   ProviderWarning,
+  UserSettingsResponse,
+  UserApiKeyCheckResponse,
   TaskMessage,
 };
 
 export interface ConversationSummary {
   id: string;
   title: string;
+  status?: "active" | "archived" | "deleted";
+  latestTaskModelId?: string;
   metadata?: ConversationMetadata;
   updatedAt: string;
   createdAt: string;
@@ -89,6 +99,14 @@ export interface ConversationsResponse {
 
 export interface ConversationResponse {
   conversation: ConversationDetail;
+}
+
+export interface DeleteConversationResponse {
+  conversation: ConversationSummary;
+}
+
+export interface ArchiveConversationResponse {
+  conversation: ConversationSummary;
 }
 
 export interface CreateTaskResponse {
@@ -189,6 +207,8 @@ export interface AdminModelCapabilityRecord {
 export interface AdminModelCapabilitiesResponse {
   modelCapabilities: AdminModelCapabilityRecord[];
 }
+
+export type AdminLogsResponse = AppLogsResponse;
 
 export interface AdminModelCapabilityResponse {
   modelCapability: AdminModelCapabilityRecord;

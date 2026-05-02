@@ -1,6 +1,6 @@
 {
   "name": "yunwu-custom-api",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "scripts": {
@@ -16,6 +16,13 @@
     "local:test:auth": "pnpm --filter @yunwu/api test:auth",
     "local:test:routes": "pnpm --filter @yunwu/web test:routes",
     "local:test:smoke": "node ./scripts/regression/local-smoke.mjs",
+    "local:test:round3": "node ./scripts/regression/round3-acceptance.mjs",
+    "local:test:browser-workspace": "node ./scripts/regression/browser-workspace-smoke.mjs",
+    "local:test:semantic-image": "node ./scripts/regression/semantic-image-smoke.mjs",
+    "desktop:dev": "pnpm --filter @yunwu/desktop dev",
+    "desktop:build": "pnpm --filter @yunwu/desktop build",
+    "desktop:typecheck": "pnpm --filter @yunwu/desktop typecheck",
+    "desktop:package": "pnpm --filter @yunwu/desktop package",
     "docker:infra:up": "docker compose --env-file .env -f infra/docker-compose.yml up -d",
     "docker:infra:down": "docker compose --env-file .env -f infra/docker-compose.yml down",
     "docker:up": "docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.app.yml up -d --build",

@@ -1,6 +1,6 @@
 {
   "name": "@yunwu/web",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test:routes": "vitest run --environment jsdom src/test/app-routing.test.tsx src/test/auth-pages.test.tsx src/test/app-shell.test.tsx"
+    "test:routes": "vitest run --environment jsdom src/test/app-routing.test.tsx src/test/auth-pages.test.tsx src/test/app-shell.test.tsx src/test/create-page.test.tsx src/test/home-page.test.tsx src/test/library-page.test.tsx src/test/composer.test.tsx src/test/settings-page.test.tsx src/test/workspace-page.test.tsx"
   },
   "dependencies": {
     "@yunwu/shared": "workspace:*",

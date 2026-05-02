@@ -1,0 +1,116 @@
+name: yunwu-desktop
+
+services:
+  api:
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.4.0}
+    container_name: yunwu-desktop-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    command:
+      - /bin/sh
+      - -lc
+      - ./apps/api/node_modules/.bin/prisma migrate deploy --schema apps/api/prisma/schema.prisma && node apps/api/dist/main.js
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yunwu_platform}?schema=public
+      REDIS_URL: redis://redis:6379
+      TASK_QUEUE_NAME: ${TASK_QUEUE_NAME:-yunwu-image-tasks}
+      TASK_QUEUE_ENABLED: "true"
+      TASK_WORKER_ENABLED: "false"
+      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-2}
+      STORAGE_MODE: minio
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-yunwu-assets}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL:-http://127.0.0.1:${MINIO_PORT:-9000}/${MINIO_BUCKET:-yunwu-assets}}
+      YUNWU_BASE_URL: ${YUNWU_BASE_URL:-https://yunwu.ai}
+      YUNWU_API_KEY: ${YUNWU_API_KEY:-}
+      AUTH_ADMIN_EMAIL: ${AUTH_ADMIN_EMAIL:-admin@yunwu.local}
+      AUTH_ADMIN_PASSWORD: ${AUTH_ADMIN_PASSWORD:-admin123456}
+      AUTH_ADMIN_DISPLAY_NAME: ${AUTH_ADMIN_DISPLAY_NAME:-Administrator}
+      AUTH_DEMO_EMAIL: ${AUTH_DEMO_EMAIL:-demo@yunwu.local}
+      AUTH_DEMO_PASSWORD: ${AUTH_DEMO_PASSWORD:-demo123456}
+      AUTH_DEMO_DISPLAY_NAME: ${AUTH_DEMO_DISPLAY_NAME:-Demo User}
+      AUTH_SESSION_SECRET: ${AUTH_SESSION_SECRET:-yunwu-desktop-session-secret-change-me}
+      AUTH_COOKIE_NAME: ${AUTH_COOKIE_NAME:-yunwu_session}
+      AUTH_SESSION_TTL_HOURS: ${AUTH_SESSION_TTL_HOURS:-168}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://127.0.0.1:${WEB_PORT:-5173},http://localhost:${WEB_PORT:-5173}}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:${WEB_PORT:-5173}}
+    ports:
+      - "${PORT:-3000}:3000"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/readiness').then((response)=>{process.exit(response.ok?0:1);}).catch(()=>process.exit(1));
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  worker:
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-worker:${YUNWU_IMAGE_TAG:-v0.4.0}
+    container_name: yunwu-desktop-worker
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yunwu_platform}?schema=public
+      REDIS_URL: redis://redis:6379
+      TASK_QUEUE_NAME: ${TASK_QUEUE_NAME:-yunwu-image-tasks}
+      TASK_QUEUE_ENABLED: "true"
+      TASK_WORKER_ENABLED: "true"
+      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-2}
+      STORAGE_MODE: minio
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: 9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-yunwu-assets}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_PUBLIC_BASE_URL: ${MINIO_PUBLIC_BASE_URL:-http://127.0.0.1:${MINIO_PORT:-9000}/${MINIO_BUCKET:-yunwu-assets}}
+      YUNWU_BASE_URL: ${YUNWU_BASE_URL:-https://yunwu.ai}
+      YUNWU_API_KEY: ${YUNWU_API_KEY:-}
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - apps/api/dist/health/worker-readiness.js
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  web:
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-web:${YUNWU_IMAGE_TAG:-v0.4.0}
+    container_name: yunwu-desktop-web
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-5173}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/health || exit 1
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s

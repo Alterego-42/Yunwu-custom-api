@@ -4,6 +4,7 @@ import { ArrowRight, Clock3, Sparkles, TriangleAlert } from "lucide-react";
 
 import { LibraryItemCard } from "@/components/cards/library-item-card";
 import { TaskCard } from "@/components/cards/task-card";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiClient } from "@/lib/api-client";
@@ -11,12 +12,76 @@ import {
   formatRelativeTime,
   getConversationSummary,
   getTaskIntentMode,
+  isLibraryItemDisplayable,
   toUiTask,
 } from "@/lib/api-mappers";
 import type { HomeResponse, TaskRecord } from "@/lib/api-types";
+import { loadStoredUserSettings } from "@/lib/user-settings";
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "请求失败，请稍后重试。";
+}
+
+function RecoveryTaskCompactCard({
+  task,
+  onRetry,
+  onOpenWorkspace,
+  onAdjust,
+  onIgnore,
+}: {
+  task: TaskRecord;
+  onRetry: (task: TaskRecord) => void;
+  onOpenWorkspace: (task: TaskRecord) => void;
+  onAdjust: (task: TaskRecord) => void;
+  onIgnore: (taskId: string) => void;
+}) {
+  return (
+    <div
+      className="rounded-xl border border-destructive/25 bg-destructive/[0.07] p-3"
+      data-testid="compact-recovery-card"
+    >
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="truncate text-sm font-medium text-foreground">{task.prompt || task.id}</p>
+            <Badge variant="outline" className="border-destructive/30 text-destructive">
+              失败
+            </Badge>
+            <Badge variant="outline">{task.modelId}</Badge>
+          </div>
+          <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
+            {task.failure?.title ?? task.errorMessage ?? "任务执行失败，可在工作台查看上下文。"}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {task.canRetry ? (
+            <Button size="sm" onClick={() => onRetry(task)}>
+              一键重试
+            </Button>
+          ) : null}
+          {task.conversationId ? (
+            <Button size="sm" variant="outline" onClick={() => onOpenWorkspace(task)}>
+              打开工作台
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={() => onIgnore(task.id)}>
+            忽略
+          </Button>
+        </div>
+      </div>
+      <details className="mt-2 text-xs text-muted-foreground">
+        <summary className="cursor-pointer select-none">失败详情 / 调整入口</summary>
+        <div className="mt-2 rounded-lg border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-low)/0.82)] p-2">
+          <p>{task.failure?.detail ?? task.errorMessage ?? "暂无更多失败详情。"}</p>
+          {task.failure?.category === "invalid_request" ? (
+            <Button className="mt-2" size="sm" variant="outline" onClick={() => onAdjust(task)}>
+              调整后继续
+            </Button>
+          ) : null}
+        </div>
+      </details>
+    </div>
+  );
 }
 
 export function HomePage() {
@@ -24,6 +89,10 @@ export function HomePage() {
   const [data, setData] = useState<HomeResponse>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showAllRecentTasks, setShowAllRecentTasks] = useState(false);
+  const [showAllRecoveryTasks, setShowAllRecoveryTasks] = useState(false);
+  const [ignoredTaskIds, setIgnoredTaskIds] = useState<string[]>([]);
+  const recentItemsLimit = loadStoredUserSettings().ui.recentItemsLimit;
 
   const loadHome = useCallback(async () => {
     setLoading(true);
@@ -53,6 +122,38 @@ export function HomePage() {
     [loadHome, navigate],
   );
 
+  const ignoredTaskIdSet = useMemo(() => new Set(ignoredTaskIds), [ignoredTaskIds]);
+  const visibleRecoveryTasks = useMemo(() => {
+    const tasks = (data?.recoveryTasks ?? []).filter((task) => !ignoredTaskIdSet.has(task.id));
+    return showAllRecoveryTasks ? tasks : tasks.slice(0, 3);
+  }, [data?.recoveryTasks, ignoredTaskIdSet, showAllRecoveryTasks]);
+  const visibleRecentTasks = useMemo(() => {
+    const tasks = (data?.recentTasks ?? []).filter((task) => !ignoredTaskIdSet.has(task.id));
+    return showAllRecentTasks ? tasks : tasks.slice(0, recentItemsLimit);
+  }, [data?.recentTasks, ignoredTaskIdSet, recentItemsLimit, showAllRecentTasks]);
+  const visibleRecentAssets = useMemo(
+    () => (data?.recentAssets ?? []).filter(isLibraryItemDisplayable),
+    [data?.recentAssets],
+  );
+  const openWorkspace = useCallback(
+    (task: TaskRecord) => {
+      if (task.conversationId) {
+        navigate(`/workspace/${task.conversationId}`);
+      }
+    },
+    [navigate],
+  );
+  const adjustTask = useCallback(
+    (task: TaskRecord) => {
+      navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`);
+    },
+    [navigate],
+  );
+  const recoveryTotal = (data?.recoveryTasks ?? []).filter((task) => !ignoredTaskIdSet.has(task.id)).length;
+  const recentTaskTotal = (data?.recentTasks ?? []).filter((task) => !ignoredTaskIdSet.has(task.id)).length;
+  const ignoreTask = useCallback((taskId: string) => {
+    setIgnoredTaskIds((current) => (current.includes(taskId) ? current : [...current, taskId]));
+  }, []);
   const stats = useMemo(
     () => [
       {
@@ -62,28 +163,28 @@ export function HomePage() {
       },
       {
         label: "最近作品",
-        value: data?.recentAssets.length ?? 0,
+        value: visibleRecentAssets.length,
         icon: Sparkles,
       },
       {
         label: "待恢复任务",
-        value: data?.recoveryTasks.length ?? 0,
+        value: recoveryTotal,
         icon: TriangleAlert,
       },
     ],
-    [data],
+    [data?.recentConversations.length, recoveryTotal, visibleRecentAssets.length],
   );
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
-      <Card className="border-white/10 bg-white/[0.03]">
+      <Card>
         <CardHeader>
           <CardTitle>首页</CardTitle>
-          <CardDescription>聚合最近会话、最近任务、最近作品和失败恢复入口。</CardDescription>
+          <CardDescription>快速回到最近工作台、作品和待处理任务。</CardDescription>
         </CardHeader>
         <CardContent className="grid gap-4 md:grid-cols-3">
           {stats.map(({ label, value, icon: Icon }) => (
-            <div key={label} className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div key={label} className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.92)] p-4">
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Icon className="h-4 w-4" />
                 <span>{label}</span>
@@ -101,19 +202,19 @@ export function HomePage() {
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-        <Card className="border-white/10 bg-white/[0.03]">
+        <Card>
           <CardHeader>
             <CardTitle>最近会话</CardTitle>
             <CardDescription>从首页直接回到上次工作台。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {loading ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+              <div className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
                 正在加载首页数据...
               </div>
             ) : null}
             {!loading && !data?.recentConversations.length ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+              <div className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
                 还没有会话，去创建页开始第一条任务。
               </div>
             ) : null}
@@ -122,7 +223,7 @@ export function HomePage() {
                 key={conversation.id}
                 type="button"
                 onClick={() => navigate(`/workspace/${conversation.id}`)}
-                className="w-full rounded-xl border border-white/10 bg-black/20 p-4 text-left transition hover:bg-white/[0.04]"
+                className="w-full rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-left transition hover:bg-[hsl(var(--surface-container-high)/0.94)]"
               >
                 <div className="flex items-center justify-between gap-3">
                   <div>
@@ -140,63 +241,53 @@ export function HomePage() {
           </CardContent>
         </Card>
 
-        <Card className="border-white/10 bg-white/[0.03]">
+        <Card>
           <CardHeader>
             <CardTitle>失败恢复</CardTitle>
-            <CardDescription>系统类失败可重试，内容类失败走参数回填。</CardDescription>
+            <CardDescription>只显示最新几条，可忽略不再处理的任务。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {!loading && !data?.recoveryTasks.length ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+            {!loading && recoveryTotal === 0 ? (
+              <div className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
                 当前没有待恢复任务。
               </div>
             ) : null}
-            {data?.recoveryTasks.map((task) => (
-              <TaskCard
+            {visibleRecoveryTasks.map((task) => (
+              <RecoveryTaskCompactCard
                 key={task.id}
-                task={toUiTask(task, [])}
-                compact
-                actions={
-                  <>
-                    {task.canRetry ? (
-                      <Button size="sm" onClick={() => void handleRetry(task)}>
-                        一键重试
-                      </Button>
-                    ) : null}
-                    {task.failure?.category === "invalid_request" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`)}
-                      >
-                        调整后继续
-                      </Button>
-                    ) : null}
-                    {task.conversationId ? (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => navigate(`/workspace/${task.conversationId}`)}
-                      >
-                        打开工作台
-                      </Button>
-                    ) : null}
-                  </>
-                }
+                task={task}
+                onRetry={(nextTask) => void handleRetry(nextTask)}
+                onOpenWorkspace={openWorkspace}
+                onAdjust={adjustTask}
+                onIgnore={ignoreTask}
               />
             ))}
+            {recoveryTotal > 3 ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowAllRecoveryTasks((current) => !current)}
+              >
+                {showAllRecoveryTasks ? "收起" : `展开全部 ${recoveryTotal} 条`}
+              </Button>
+            ) : null}
           </CardContent>
         </Card>
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-        <Card className="border-white/10 bg-white/[0.03]">
+        <Card>
           <CardHeader>
             <CardTitle>最近任务</CardTitle>
-            <CardDescription>继续创作默认回原会话，显式 fork 才分支。</CardDescription>
+            <CardDescription>默认只显示最新几条，更多任务可展开查看。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {data?.recentTasks.map((task) => (
+            {!loading && recentTaskTotal === 0 ? (
+              <div className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
+                暂无最近任务。
+              </div>
+            ) : null}
+            {visibleRecentTasks.map((task) => (
               <TaskCard
                 key={task.id}
                 task={toUiTask(task, [])}
@@ -219,20 +310,32 @@ export function HomePage() {
                     >
                       继续创作
                     </Button>
+                    <Button size="sm" variant="ghost" onClick={() => ignoreTask(task.id)}>
+                      忽略
+                    </Button>
                   </>
                 }
               />
             ))}
+            {recentTaskTotal > recentItemsLimit ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => setShowAllRecentTasks((current) => !current)}
+              >
+                {showAllRecentTasks ? "收起" : `展开全部 ${recentTaskTotal} 条`}
+              </Button>
+            ) : null}
           </CardContent>
         </Card>
 
-        <Card className="border-white/10 bg-white/[0.03]">
+        <Card>
           <CardHeader>
             <CardTitle>最近作品</CardTitle>
-            <CardDescription>已自动排除软删除作品。</CardDescription>
+            <CardDescription>查看最近完成的作品。</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-4 md:grid-cols-2">
-            {data?.recentAssets.map((item) => (
+            {visibleRecentAssets.map((item) => (
               <LibraryItemCard
                 key={item.asset.id}
                 item={item}
@@ -260,8 +363,8 @@ export function HomePage() {
                 }
               />
             ))}
-            {!loading && !data?.recentAssets.length ? (
-              <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+            {!loading && !visibleRecentAssets.length ? (
+              <div className="rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
                 最近作品为空，先去创建页生成第一张图。
               </div>
             ) : null}

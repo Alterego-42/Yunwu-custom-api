@@ -17,6 +17,7 @@ interface TaskInputShape {
   prompt?: string;
   assetIds?: string[];
   params?: Record<string, unknown>;
+  providerBaseUrl?: string;
 }
 
 @Injectable()
@@ -101,7 +102,13 @@ export class TaskExecutionService {
       });
       this.publishTaskUpdated(task.conversationId, task.id, "running");
 
+      const baseConfig = await this.openaiCompatible.getBaseConfig();
+      const providerApiKey = await this.getUserProviderApiKey(task.userId);
       const requestSummary = this.buildProviderRequestSummary(
+        {
+          ...baseConfig,
+          hasApiKey: Boolean(providerApiKey) || baseConfig.hasApiKey,
+        },
         capability,
         input,
         orderedInputAssets,
@@ -115,6 +122,9 @@ export class TaskExecutionService {
         capability,
         model: input.model ?? "gpt-image-1",
         prompt: input.prompt ?? "",
+        baseUrl: input.providerBaseUrl,
+        apiKey: providerApiKey,
+        allowMock: false,
         inputAssets: orderedInputAssets.map((asset) => ({
           id: asset.id,
           url: asset.url,
@@ -244,6 +254,21 @@ export class TaskExecutionService {
       : {};
   }
 
+  private async getUserProviderApiKey(userId: string) {
+    const rows = await this.prisma.$queryRaw<
+      Array<{ providerApiKey: string | null }>
+    >(
+      Prisma.sql`
+        SELECT "provider_api_key" AS "providerApiKey"
+        FROM "user_settings"
+        WHERE "user_id" = ${userId}
+        LIMIT 1
+      `,
+    );
+
+    return rows[0]?.providerApiKey?.trim() || undefined;
+  }
+
   private asSupportedCapability(value: string): SupportedTaskCapability {
     return value === "image.edit" ? "image.edit" : "image.generate";
   }
@@ -265,20 +290,19 @@ export class TaskExecutionService {
   }
 
   private buildProviderRequestSummary(
+    baseConfig: { hasApiKey: boolean; baseUrl: string },
     capability: SupportedTaskCapability,
     input: TaskInputShape,
     inputAssets: Asset[],
   ) {
-    const baseConfig = this.openaiCompatible.getBaseConfig();
     const prompt = input.prompt ?? "";
 
     return {
       mode: baseConfig.hasApiKey ? "live" : "mock",
-      endpointPath:
-        capability === "image.edit"
-          ? "/v1/images/edits"
-          : "/v1/images/generations",
+      baseUrl: input.providerBaseUrl ?? baseConfig.baseUrl,
+      endpointPath: this.resolveProviderEndpointPath(capability, input.model),
       model: input.model ?? "gpt-image-1",
+      providerBaseUrl: input.providerBaseUrl,
       capability,
       promptPreview: this.truncateText(prompt, 180),
       promptLength: prompt.length,
@@ -286,6 +310,19 @@ export class TaskExecutionService {
       inputAssetIds: inputAssets.map((asset) => asset.id),
       params: this.summarizeParams(input.params),
     };
+  }
+
+  private resolveProviderEndpointPath(
+    capability: SupportedTaskCapability,
+    model?: string,
+  ) {
+    if (capability === "image.edit" && model?.startsWith("gemini-")) {
+      return "/v1/chat/completions";
+    }
+
+    return capability === "image.edit"
+      ? "/v1/images/edits"
+      : "/v1/images/generations";
   }
 
   private summarizeParams(params?: Record<string, unknown>) {

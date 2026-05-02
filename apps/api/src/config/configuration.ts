@@ -104,7 +104,8 @@ export const configuration = () => ({
   },
   yunwu: {
     providerName: process.env.YUNWU_PROVIDER_NAME,
-    baseUrl: process.env.YUNWU_BASE_URL,
+    baseUrl: process.env.YUNWU_BASE_URL ?? "https://yunwu.ai",
     apiKey: process.env.YUNWU_API_KEY,
+    allowMockImages: process.env.YUNWU_ALLOW_MOCK_IMAGES === "true",
   },
 });

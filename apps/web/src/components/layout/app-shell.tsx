@@ -3,10 +3,13 @@ import {
   House,
   LayoutDashboard,
   LogOut,
+  Monitor,
   MessagesSquare,
   PlusSquare,
+  Settings,
   Sparkles,
 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Link,
   NavLink,
@@ -16,7 +19,9 @@ import {
 } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
+import { apiClient } from "@/lib/api-client";
 import { useAuth } from "@/lib/auth";
+import { applyUserTheme } from "@/lib/user-settings";
 import { cn } from "@/lib/utils";
 
 type AppShellMode = "user" | "admin";
@@ -26,6 +31,7 @@ const userNavItems = [
   { to: "/create", label: "创建", icon: PlusSquare },
   { to: "/history", label: "历史", icon: MessagesSquare },
   { to: "/library", label: "作品库", icon: BookImage },
+  { to: "/settings", label: "配置", icon: Settings },
 ];
 
 const adminNavItems = [
@@ -50,6 +56,44 @@ export function AppShell({ mode = "user" }: { mode?: AppShellMode }) {
   const navigate = useNavigate();
   const { isAdmin, role, user, logout } = useAuth();
   const navItems = mode === "admin" ? adminNavItems : userNavItems;
+  const [recentWorkspaceHref, setRecentWorkspaceHref] = useState("/create");
+  const currentWorkspaceHref = useMemo(() => {
+    const match = location.pathname.match(/^\/workspace\/([^/]+)/);
+    return match ? `/workspace/${match[1]}` : undefined;
+  }, [location.pathname]);
+  const workspaceHref = currentWorkspaceHref ?? recentWorkspaceHref;
+
+  useEffect(() => {
+    applyUserTheme();
+  }, []);
+
+  useEffect(() => {
+    if (mode !== "user" || currentWorkspaceHref) {
+      return;
+    }
+
+    let cancelled = false;
+    apiClient
+      .getHome()
+      .then((home) => {
+        if (!cancelled) {
+          setRecentWorkspaceHref(
+            home.recentConversations[0]?.id
+              ? `/workspace/${home.recentConversations[0].id}`
+              : "/create",
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentWorkspaceHref("/create");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentWorkspaceHref, mode]);
 
   async function handleLogout() {
     await logout();
@@ -67,28 +111,45 @@ export function AppShell({ mode = "user" }: { mode?: AppShellMode }) {
   }
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="fixed inset-0 -z-10 bg-[radial-gradient(circle_at_top,rgba(56,189,248,.12),transparent_30%),linear-gradient(180deg,#08111f_0%,#0b1120_32%,#020617_100%)]" />
-      <div className="fixed inset-0 -z-10 bg-grid bg-[size:24px_24px] opacity-20" />
+    <div className="min-h-screen bg-transparent text-foreground">
+      <div className="fixed inset-0 -z-20 bg-background" />
+      <div className="fixed inset-0 -z-10 bg-app-shell" />
+      <div className="fixed inset-0 -z-10 bg-grid bg-[size:24px_24px] opacity-[var(--shell-grid-opacity)]" />
 
-      <div className="mx-auto flex min-h-screen max-w-[1800px] flex-col px-4 py-4 sm:px-6">
-        <header className="mb-4 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-white/10 bg-black/20 px-5 py-4 backdrop-blur">
+      <div className="mx-auto flex min-h-screen max-w-[1800px] flex-col px-4 py-3 sm:px-5">
+        <header className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-[1.4rem] border border-[hsl(var(--outline-variant)/0.7)] bg-[hsl(var(--surface-container-low)/0.76)] px-4 py-2.5 shadow-[var(--header-shadow)] backdrop-blur-md">
           <Link
             to={mode === "admin" ? "/admin" : "/"}
             className="flex items-center gap-3"
           >
-            <div className="rounded-2xl border border-primary/30 bg-primary/15 p-2 text-primary">
-              <Sparkles className="h-5 w-5" />
+            <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.7)] bg-[hsl(var(--surface-container-high)/0.8)] p-1.5 text-primary">
+              <Sparkles className="h-4 w-4" />
             </div>
             <div>
-              <h1 className="text-lg font-semibold">Yunwu Image Platform</h1>
+              <h1 className="text-base font-semibold">Yunwu Image Platform</h1>
               <p className="text-xs text-muted-foreground">
                 {mode === "admin" ? "管理员后台入口" : "个人创作台"}
               </p>
             </div>
           </Link>
 
-          <nav className="flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] p-1">
+          <nav className="flex items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.65)] bg-[hsl(var(--surface-container-low)/0.58)] p-1">
+            {mode === "user" ? (
+              <NavLink
+                to={workspaceHref}
+                className={() =>
+                  cn(
+                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs transition-colors",
+                    location.pathname.startsWith("/workspace")
+                      ? "bg-primary text-primary-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )
+                }
+              >
+                <Monitor className="h-3.5 w-3.5" />
+                工作台
+              </NavLink>
+            ) : null}
             {navItems.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
@@ -96,20 +157,20 @@ export function AppShell({ mode = "user" }: { mode?: AppShellMode }) {
                 end={to === "/"}
                 className={({ isActive }) =>
                   cn(
-                    "inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm transition-colors",
+                    "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs transition-colors",
                     isActive
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground",
                   )
                 }
               >
-                <Icon className="h-4 w-4" />
+                <Icon className="h-3.5 w-3.5" />
                 {label}
               </NavLink>
             ))}
           </nav>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             {isAdmin ? (
               <Button
                 variant="outline"

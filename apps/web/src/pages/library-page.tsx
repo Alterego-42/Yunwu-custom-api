@@ -6,6 +6,7 @@ import { LibraryItemCard } from "@/components/cards/library-item-card";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { apiClient } from "@/lib/api-client";
+import { isLibraryItemDisplayable } from "@/lib/api-mappers";
 import type { LibraryItemRecord, LibraryResponse } from "@/lib/api-types";
 
 function getErrorMessage(error: unknown) {
@@ -37,6 +38,10 @@ export function LibraryPage() {
   }, [loadLibrary]);
 
   const deletingSet = useMemo(() => new Set(deletingIds), [deletingIds]);
+  const visibleItems = useMemo(
+    () => (data?.items ?? []).filter(isLibraryItemDisplayable),
+    [data?.items],
+  );
 
   const handleDelete = useCallback(async (item: LibraryItemRecord) => {
     setDeletingIds((current) => [...current, item.asset.id]);
@@ -59,13 +64,13 @@ export function LibraryPage() {
 
   return (
     <div className="mx-auto flex max-w-7xl flex-col gap-6">
-      <Card className="border-white/10 bg-white/[0.03]">
+      <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <FolderOpen className="h-5 w-5 text-primary" />
             <CardTitle>作品库</CardTitle>
           </div>
-          <CardDescription>仅展示成功作品；软删除只影响作品库和首页最近作品。</CardDescription>
+          <CardDescription>集中查看已完成作品，可继续创作、Fork 或删除。</CardDescription>
         </CardHeader>
       </Card>
 
@@ -77,17 +82,17 @@ export function LibraryPage() {
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {loading ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
             正在加载作品库...
           </div>
         ) : null}
-        {!loading && !data?.items.length ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-muted-foreground">
+        {!loading && !visibleItems.length ? (
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-sm text-muted-foreground">
             作品库为空，生成成功的作品会出现在这里。
           </div>
         ) : null}
 
-        {data?.items.map((item) => (
+        {visibleItems.map((item) => (
           <LibraryItemCard
             key={item.asset.id}
             item={item}

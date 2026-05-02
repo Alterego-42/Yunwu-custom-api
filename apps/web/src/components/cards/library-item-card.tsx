@@ -4,7 +4,11 @@ import { Download, FolderGit2, Image as ImageIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { formatRelativeTime, resolveAssetUrl } from "@/lib/api-mappers";
+import {
+  formatRelativeTime,
+  isLibraryItemDisplayable,
+  resolveAssetUrl,
+} from "@/lib/api-mappers";
 import type { LibraryItemRecord } from "@/lib/api-types";
 
 export function LibraryItemCard({
@@ -16,11 +20,15 @@ export function LibraryItemCard({
   actions?: ReactNode;
   deleting?: boolean;
 }) {
+  if (!isLibraryItemDisplayable(item)) {
+    return null;
+  }
+
   const assetUrl = resolveAssetUrl(item.asset.url);
 
   return (
-    <Card className="overflow-hidden border-white/10 bg-white/[0.03]">
-      <div className="relative aspect-[4/3] overflow-hidden border-b border-white/10 bg-black/20">
+    <Card className="overflow-hidden">
+      <div className="relative aspect-[4/3] overflow-hidden border-b border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))]">
         {assetUrl ? (
           <img src={assetUrl} alt={item.task.prompt} className="h-full w-full object-cover" />
         ) : (
@@ -42,7 +50,7 @@ export function LibraryItemCard({
           </p>
         </div>
 
-        <div className="flex items-center justify-between rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-muted-foreground">
+        <div className="flex items-center justify-between rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1">
             <FolderGit2 className="h-3.5 w-3.5" />
             {item.task.id}

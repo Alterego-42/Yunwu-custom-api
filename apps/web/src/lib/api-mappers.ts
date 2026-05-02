@@ -11,6 +11,7 @@ import type {
   UiImageResult,
   UiTask,
   UiTaskAsset,
+  UiTaskRoundNavigation,
 } from "@/lib/api-types";
 import { apiClient } from "@/lib/api-client";
 
@@ -82,8 +83,23 @@ export function getConversationModel(conversation?: ConversationDetail | Convers
     return conversation.model;
   }
 
+  if (conversation.metadata) {
+    const metadataModel =
+      typeof conversation.metadata.model === "string"
+        ? conversation.metadata.model
+        : typeof conversation.metadata.recentTaskModel === "string"
+          ? conversation.metadata.recentTaskModel
+          : typeof conversation.metadata.lastTaskModel === "string"
+            ? conversation.metadata.lastTaskModel
+            : undefined;
+
+    if (metadataModel) {
+      return metadataModel;
+    }
+  }
+
   if ("tasks" in conversation) {
-    return conversation.tasks[0]?.modelId ?? "未选择";
+    return conversation.tasks.at(-1)?.modelId ?? "未选择";
   }
 
   return "未选择";
@@ -116,7 +132,7 @@ export function toConversationSummary(conversation: ConversationDetail): Convers
       : conversation.tasks.length > 0
         ? "done"
         : "idle",
-    model: conversation.tasks[0]?.modelId,
+    model: getConversationModel(conversation),
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
   };
@@ -175,6 +191,58 @@ export function getTaskOutputAssetIds(task: TaskRecord) {
   return Array.isArray(generatedAssetIds)
     ? generatedAssetIds.filter((value): value is string => typeof value === "string")
     : [];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function hasMockedMarker(value: unknown): boolean {
+  const record = asRecord(value);
+
+  if (record.mocked === true) {
+    return true;
+  }
+
+  const metadata = asRecord(record.metadata);
+  if (metadata.mocked === true) {
+    return true;
+  }
+
+  const assets = record.assets;
+  if (Array.isArray(assets) && assets.some(hasMockedMarker)) {
+    return true;
+  }
+
+  return false;
+}
+
+export function isTaskMocked(task: Pick<TaskRecord, "outputSummary">) {
+  return hasMockedMarker(task.outputSummary);
+}
+
+export function isTaskRealSucceeded(
+  task: Pick<TaskRecord, "status" | "outputSummary">,
+) {
+  return task.status === "succeeded" && !isTaskMocked(task);
+}
+
+export function isLibraryItemDisplayable(item: {
+  asset: AssetRecord;
+  task: Pick<TaskRecord, "status" | "outputSummary">;
+}) {
+  const assetWithRuntimeFields = item.asset as AssetRecord & {
+    mocked?: unknown;
+    metadata?: unknown;
+  };
+
+  return (
+    item.asset.type === "generated" &&
+    !hasMockedMarker(assetWithRuntimeFields) &&
+    isTaskRealSucceeded(item.task)
+  );
 }
 
 function createTaskPlaceholderAsset(task: TaskRecord, assetId: string): AssetRecord {
@@ -266,6 +334,12 @@ export function modelSupportsCapability(
   return model?.capabilityTypes.includes(capability) ?? false;
 }
 
+export function isModelTaskSubmittable(
+  model: Pick<ModelRecord, "status" | "taskSupported"> | undefined,
+) {
+  return Boolean(model && model.taskSupported !== false && model.status !== "unsupported");
+}
+
 export function resolveComposerCapability(input: {
   requestedCapability: CapabilityType;
   assetCount?: number;
@@ -290,13 +364,20 @@ export function getComposerSubmissionGuard(input: {
     };
   }
 
+  if (input.modelId && model && !isModelTaskSubmittable(model)) {
+    return {
+      capability,
+      reason: model.statusMessage || "该模型暂未接入当前任务通道。",
+    };
+  }
+
   if (input.modelId && model && !modelSupportsCapability(model, capability)) {
     return {
       capability,
       reason:
         capability === "image.edit"
-          ? `当前模型 ${toModelLabel(model)} 不支持图片编辑，请切换到支持 image.edit 的模型。`
-          : `当前模型 ${toModelLabel(model)} 不支持 ${capability}。`,
+          ? `当前模型 ${toModelLabel(model)} 不支持图片编辑，请切换到支持图片编辑的模型。`
+          : `当前模型 ${toModelLabel(model)} 不支持当前能力。`,
     };
   }
 
@@ -370,10 +451,13 @@ export function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
   const inputAssets = assets
     .filter((asset) => inputAssetIds.has(asset.id))
     .map(toUiTaskAsset);
-  const resultAssets = assets
-    .filter((asset) => outputAssetIds.has(asset.id) || asset.taskId === task.id)
-    .filter((asset) => asset.type === "generated")
-    .map(toUiTaskAsset);
+  const resultAssets = isTaskRealSucceeded(task)
+    ? assets
+        .filter((asset) => outputAssetIds.has(asset.id) || asset.taskId === task.id)
+        .filter((asset) => asset.type === "generated")
+        .filter((asset) => !hasMockedMarker(asset))
+        .map(toUiTaskAsset)
+    : [];
 
   return {
     id: task.id,
@@ -404,23 +488,102 @@ export function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
   };
 }
 
+function getTaskSortTime(task: Pick<TaskRecord, "createdAt" | "updatedAt">) {
+  const value = new Date(task.createdAt ?? task.updatedAt ?? 0).getTime();
+  return Number.isNaN(value) ? 0 : value;
+}
+
+export function buildTaskRoundNavigation(tasks: TaskRecord[]) {
+  const result = new Map<string, UiTaskRoundNavigation>();
+  const originalOrder = new Map(tasks.map((task, index) => [task.id, index]));
+  const orderedTasks = [...tasks].sort((left, right) => {
+    const diff = getTaskSortTime(left) - getTaskSortTime(right);
+    return diff !== 0 ? diff : (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
+  });
+  const taskById = new Map(orderedTasks.map((task) => [task.id, task]));
+  const retryLineageByRootId = new Map<string, TaskRecord[]>();
+
+  function getRootId(task: TaskRecord) {
+    let current = task;
+    const seen = new Set<string>([task.id]);
+
+    while (
+      current.sourceAction === "retry" &&
+      current.sourceTaskId &&
+      taskById.has(current.sourceTaskId) &&
+      !seen.has(current.sourceTaskId)
+    ) {
+      seen.add(current.sourceTaskId);
+      current = taskById.get(current.sourceTaskId) ?? current;
+    }
+
+    return current.id;
+  }
+
+  function assignNavigation(groupId: string, items: TaskRecord[]) {
+    const taskIds = items.map((task) => task.id);
+
+    items.forEach((task, index) => {
+      result.set(task.id, {
+        scope: "retry",
+        groupId,
+        taskIds,
+        index: index + 1,
+        total: items.length,
+        previousTaskId: items[index - 1]?.id,
+        nextTaskId: items[index + 1]?.id,
+      });
+    });
+  }
+
+  orderedTasks.forEach((task) => {
+    if (task.sourceAction !== "retry") {
+      if (!orderedTasks.some((item) => item.sourceAction === "retry" && item.sourceTaskId === task.id)) {
+        return;
+      }
+    }
+
+    const rootId = getRootId(task);
+    const lineage = retryLineageByRootId.get(rootId) ?? [];
+    lineage.push(task);
+    retryLineageByRootId.set(rootId, lineage);
+  });
+
+  retryLineageByRootId.forEach((lineage, rootId) => {
+    const retryItems = lineage.filter((task) => task.sourceAction === "retry");
+
+    if (retryItems.length > 0 && lineage.length > 1) {
+      assignNavigation(rootId, lineage);
+    }
+  });
+
+  return result;
+}
+
 export function toImageResults(tasks: TaskRecord[], assets: AssetRecord[]): UiImageResult[] {
   return assets
     .filter((asset) => asset.type === "generated")
-    .map((asset, index) => {
+    .filter((asset) => !hasMockedMarker(asset))
+    .flatMap((asset, index): UiImageResult[] => {
       const task = tasks.find((item) => item.id === asset.taskId);
 
-      return {
-        id: asset.id,
-        prompt: task?.prompt ?? "生成结果",
-        size:
-          asset.width && asset.height
-            ? `${asset.width} × ${asset.height}`
-            : asset.mimeType ?? "未知尺寸",
-        model: task?.modelId ?? "unknown",
-        badge: `结果 ${index + 1}`,
-        url: resolveAssetUrl(asset.url),
-      };
+      if (task && !isTaskRealSucceeded(task)) {
+        return [];
+      }
+
+      return [
+        {
+          id: asset.id,
+          prompt: task?.prompt ?? "生成结果",
+          size:
+            asset.width && asset.height
+              ? `${asset.width} × ${asset.height}`
+              : asset.mimeType ?? "未知尺寸",
+          model: task?.modelId ?? "unknown",
+          badge: `结果 ${index + 1}`,
+          url: resolveAssetUrl(asset.url),
+        },
+      ];
     });
 }
 

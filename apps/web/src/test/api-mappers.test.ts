@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildTaskRoundNavigation,
   getComposerSubmissionGuard,
   getTaskComposerAssets,
   getTaskRuntimeLabel,
+  isLibraryItemDisplayable,
+  isTaskMocked,
   resolveComposerCapability,
   resolveAssetUrl,
+  toImageResults,
+  toUiTask,
 } from "@/lib/api-mappers";
 import type { AssetRecord, ModelRecord, TaskRecord } from "@/lib/api-types";
 
@@ -111,6 +116,40 @@ describe("api mappers", () => {
     expect(guard.reason).toContain("不支持图片编辑");
   });
 
+  it("blocks unsupported task-channel models and prefers the backend status message", () => {
+    const guard = getComposerSubmissionGuard({
+      models: [
+        createModel({
+          id: "gpt-4o-image",
+          name: "GPT-4o Image",
+          taskSupported: false,
+          status: "unsupported",
+          statusMessage: "该模型正在接入中。",
+        }),
+      ],
+      modelId: "gpt-4o-image",
+      requestedCapability: "image.generate",
+    });
+
+    expect(guard.reason).toBe("该模型正在接入中。");
+  });
+
+  it("uses a clear fallback message for unsupported task-channel models", () => {
+    const guard = getComposerSubmissionGuard({
+      models: [
+        createModel({
+          id: "manual-model",
+          name: "Manual Model",
+          taskSupported: false,
+        }),
+      ],
+      modelId: "manual-model",
+      requestedCapability: "image.generate",
+    });
+
+    expect(guard.reason).toBe("该模型暂未接入当前任务通道。");
+  });
+
   it("resolves relative asset urls against api origin", () => {
     const resolvedFromLiteral = resolveAssetUrl("/api/assets/asset_1/content");
     const resolvedFromAsset = resolveAssetUrl(createAsset().url);
@@ -119,6 +158,60 @@ describe("api mappers", () => {
     expect(new URL(resolvedFromLiteral ?? "").pathname).toBe(
       "/api/assets/asset_1/content",
     );
+  });
+
+  it("does not expose generated assets on failed tasks", () => {
+    const failedTask = createTask({
+      status: "failed",
+      errorMessage: "Provider unavailable: missing API key.",
+      failure: {
+        category: "provider_unavailable",
+        retryable: false,
+        title: "Provider unavailable",
+        detail: "Real image generation is unavailable because the provider API key is not configured.",
+      },
+      outputSummary: {
+        generatedAssetIds: ["asset_1"],
+      },
+    });
+
+    const uiTask = toUiTask(failedTask, [createAsset()]);
+
+    expect(uiTask.errorMessage).toContain("missing API key");
+    expect(uiTask.failure?.detail).toContain("provider API key");
+    expect(uiTask.resultAssets).toEqual([]);
+  });
+
+  it("filters mocked outputs from result and library projections", () => {
+    const mockedTask = createTask({
+      outputSummary: {
+        mocked: true,
+        generatedAssetIds: ["asset_1"],
+      },
+    });
+    const realTask = createTask({
+      id: "task_2",
+      outputSummary: {
+        mocked: false,
+        generatedAssetIds: ["asset_2"],
+      },
+    });
+    const realAsset = createAsset({
+      id: "asset_2",
+      taskId: "task_2",
+    });
+
+    expect(isTaskMocked(mockedTask)).toBe(true);
+    expect(toUiTask(mockedTask, [createAsset()]).resultAssets).toEqual([]);
+    expect(
+      isLibraryItemDisplayable({
+        asset: createAsset(),
+        task: mockedTask,
+      }),
+    ).toBe(false);
+    expect(
+      toImageResults([mockedTask, realTask], [createAsset(), realAsset]).map((item) => item.id),
+    ).toEqual(["asset_2"]);
   });
 
   it("formats task runtime from created and updated timestamps", () => {
@@ -137,5 +230,68 @@ describe("api mappers", () => {
     expect(getTaskRuntimeLabel(createTask())).toBe("耗时 2 分");
 
     vi.useRealTimers();
+  });
+
+  it("builds retry round navigation without falling back to conversation order", () => {
+    const source = createTask({
+      id: "task_source",
+      createdAt: "2026-04-24T10:00:00.000Z",
+    });
+    const retry = createTask({
+      id: "task_retry",
+      sourceTaskId: "task_source",
+      sourceAction: "retry",
+      createdAt: "2026-04-24T10:02:00.000Z",
+    });
+    const standalone = createTask({
+      id: "task_standalone",
+      createdAt: "2026-04-24T10:03:00.000Z",
+    });
+
+    const navigation = buildTaskRoundNavigation([source, retry, standalone]);
+
+    expect(navigation.get("task_source")).toMatchObject({
+      scope: "retry",
+      groupId: "task_source",
+      taskIds: ["task_source", "task_retry"],
+      index: 1,
+      total: 2,
+      nextTaskId: "task_retry",
+    });
+    expect(navigation.get("task_retry")).toMatchObject({
+      scope: "retry",
+      groupId: "task_source",
+      taskIds: ["task_source", "task_retry"],
+      index: 2,
+      total: 2,
+      previousTaskId: "task_source",
+    });
+    expect(navigation.has("task_standalone")).toBe(false);
+  });
+
+  it("does not treat edit, variant, or fork descendants as retry rounds", () => {
+    const source = createTask({ id: "task_source" });
+    const edit = createTask({
+      id: "task_edit",
+      sourceTaskId: "task_source",
+      sourceAction: "edit",
+      createdAt: "2026-04-24T10:01:00.000Z",
+    });
+    const variant = createTask({
+      id: "task_variant",
+      sourceTaskId: "task_source",
+      sourceAction: "variant",
+      createdAt: "2026-04-24T10:02:00.000Z",
+    });
+    const fork = createTask({
+      id: "task_fork",
+      sourceTaskId: "task_source",
+      sourceAction: "fork",
+      createdAt: "2026-04-24T10:03:00.000Z",
+    });
+
+    const navigation = buildTaskRoundNavigation([source, edit, variant, fork]);
+
+    expect(navigation.size).toBe(0);
   });
 });

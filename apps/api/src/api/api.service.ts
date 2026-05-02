@@ -20,6 +20,7 @@ import type {
   AdminModelCapabilitiesResponse,
   AdminModelCapabilityRecord,
   AdminModelCapabilityResponse,
+  ArchiveConversationResponse,
   AssetRecord,
   CapabilityType,
   CapabilitiesResponse,
@@ -30,6 +31,7 @@ import type {
   ConversationTaskEventsResponse,
   ConversationsResponse,
   CreateTaskResponse,
+  DeleteConversationResponse,
   DeleteLibraryAssetResponse,
   HistoryResponse,
   HomeResponse,
@@ -55,16 +57,26 @@ import type {
   TaskRecord,
   TasksResponse,
   TaskResponse,
+  UserApiKeyCheckResponse,
+  UserSettingsResponse,
 } from "./api.types";
 import {
   OpenAICompatibleService,
   type OpenAICompatibleProviderProbeResult,
 } from "../openai-compatible/openai-compatible.service";
 import { ProviderAlertsService } from "../openai-compatible/provider-alerts.service";
+import { ProviderConfigurationService } from "../openai-compatible/provider-configuration.service";
 import {
   ProviderOperationalStateService,
   type ProviderOperationalStateRecord,
 } from "../openai-compatible/provider-operational-state.service";
+import {
+  DEFAULT_YUNWU_MODEL_IDS,
+  getYunwuModelDefinition,
+  YUNWU_BASE_URLS,
+  YUNWU_MODEL_DEFINITIONS,
+  type YunwuModelDefinition,
+} from "../openai-compatible/yunwu-model-registry";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   TaskEventsService,
@@ -75,7 +87,10 @@ import { ConversationEventsService } from "./conversation-events.service";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateTaskDto } from "./dto/create-task.dto";
 import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
+import { CheckUserApiKeyDto } from "./dto/check-user-api-key.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
+import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
+import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";
 
 export const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible";
 type SupportedTaskCapability = "image.generate" | "image.edit";
@@ -88,40 +103,20 @@ const CAPABILITY_NAMES: Record<string, string> = {
   "image.generate": "Image generation",
   "image.edit": "Image editing",
 };
-const DEFAULT_OPENAI_COMPATIBLE_MODELS: Array<{
-  model: string;
-  capabilities: CapabilityType[];
-  metadata: {
-    name: string;
-    type: "image-generation" | "image-editing";
-    description: string;
-  };
-}> = [
-  {
-    model: "flux-schnell",
-    capabilities: ["image.generate"],
-    metadata: {
-      name: "FLUX Schnell",
-      type: "image-generation",
-      description: "Low-cost OpenAI-compatible image generation model",
-    },
-  },
-  {
-    model: "gpt-image-1",
-    capabilities: ["image.generate", "image.edit"],
-    metadata: {
-      name: "GPT Image 1",
-      type: "image-editing",
-      description: "OpenAI-compatible image generation and editing model",
-    },
-  },
-];
 
 interface TaskInputShape {
   model?: string;
   prompt?: string;
   assetIds?: string[];
   params?: Record<string, unknown>;
+  providerBaseUrl?: string;
+}
+
+interface ResolvedUserSettings {
+  baseUrl: string;
+  providerApiKey?: string;
+  enabledModelIds: string[];
+  ui: Record<string, unknown>;
 }
 
 type TaskRecordEntity = Task & {
@@ -138,6 +133,7 @@ export class ApiService implements OnModuleInit {
     private readonly taskEvents: TaskEventsService,
     private readonly conversationEvents: ConversationEventsService,
     private readonly openaiCompatible: OpenAICompatibleService,
+    private readonly providerConfig: ProviderConfigurationService,
     private readonly providerState: ProviderOperationalStateService,
     private readonly providerAlerts: ProviderAlertsService,
   ) {}
@@ -146,12 +142,20 @@ export class ApiService implements OnModuleInit {
     await this.ensureDefaultModels();
   }
 
-  async getCapabilities(): Promise<CapabilitiesResponse> {
+  async getCapabilities(user: AuthenticatedUser): Promise<CapabilitiesResponse> {
+    const settings = await this.resolveUserSettings(user.id);
     const rows = await this.prisma.modelCapability.findMany({
-      where: { enabled: true },
+      where: {
+        provider: OPENAI_COMPATIBLE_PROVIDER,
+        model: { in: settings.enabledModelIds },
+      },
     });
     const capabilities = [
-      ...new Set(rows.flatMap((row) => this.capabilitiesOf(row))),
+      ...new Set(
+        rows
+          .filter((row) => this.isTaskSupportedModel(row))
+          .flatMap((row) => this.capabilitiesOf(row)),
+      ),
     ]
       .filter((capability) => this.isSupportedCapability(capability))
       .map((key) => ({
@@ -162,13 +166,103 @@ export class ApiService implements OnModuleInit {
     return { capabilities };
   }
 
-  async getModels(): Promise<ModelsResponse> {
+  async getModels(user: AuthenticatedUser): Promise<ModelsResponse> {
+    const settings = await this.resolveUserSettings(user.id);
     const rows = await this.prisma.modelCapability.findMany({
-      where: { enabled: true },
+      where: {
+        provider: OPENAI_COMPATIBLE_PROVIDER,
+        model: { in: settings.enabledModelIds },
+      },
       orderBy: [{ provider: "asc" }, { model: "asc" }],
     });
 
-    return { models: rows.map((row) => this.toModelRecord(row)) };
+    return {
+      models: rows
+        .map((row) => this.toModelRecord(row)),
+    };
+  }
+
+  async getSettings(user: AuthenticatedUser): Promise<UserSettingsResponse> {
+    return {
+      settings: await this.toUserSettingsResponse(
+        await this.resolveUserSettings(user.id),
+      ),
+    };
+  }
+
+  async updateSettings(
+    user: AuthenticatedUser,
+    input: UpdateUserSettingsDto,
+  ): Promise<UserSettingsResponse> {
+    const current = await this.resolveUserSettings(user.id);
+    const baseUrl =
+      input.baseUrl === undefined
+        ? current.baseUrl
+        : this.normalizeSupportedBaseUrl(input.baseUrl);
+    const enabledModelIds =
+      input.enabledModelIds === undefined
+        ? current.enabledModelIds
+        : this.normalizeEnabledModelIds(input.enabledModelIds);
+    const ui =
+      input.ui === undefined ? current.ui : this.toJsonRecord(input.ui);
+    const providerApiKey =
+      input.clearApiKey === true
+        ? undefined
+        : input.apiKey === undefined
+          ? current.providerApiKey
+          : this.normalizeApiKey(input.apiKey);
+
+    const settings = { baseUrl, providerApiKey, enabledModelIds, ui };
+    await this.persistUserSettings(user.id, settings);
+
+    return { settings: await this.toUserSettingsResponse(settings) };
+  }
+
+  async checkUserApiKey(
+    user: AuthenticatedUser,
+    input: CheckUserApiKeyDto = {},
+  ): Promise<UserApiKeyCheckResponse> {
+    const current = await this.resolveUserSettings(user.id);
+    const temporaryApiKey =
+      typeof input.apiKey === "string" && input.apiKey.trim()
+        ? this.normalizeApiKey(input.apiKey)
+        : undefined;
+    const apiKey =
+      temporaryApiKey !== undefined
+        ? temporaryApiKey
+        : current.providerApiKey?.trim() || undefined;
+    const check = apiKey
+      ? await this.openaiCompatible.checkProviderModels({
+          baseUrl: current.baseUrl,
+          apiKey,
+        })
+      : {
+          baseUrlReachable: false,
+          modelsSource: "unavailable" as const,
+          error: {
+            category: "missing_api_key" as const,
+            message: "No API key is configured. Enter an API key or save one first.",
+            retryable: false,
+          },
+        };
+    const healthCheck = this.toProviderHealthCheckForUserCheck(
+      check,
+      Boolean(apiKey),
+    );
+    const ok = healthCheck.status === "ok";
+
+    return {
+      ok,
+      status: healthCheck.status,
+      message: ok
+        ? "API key connectivity check succeeded."
+        : (healthCheck.error?.message ?? "API key connectivity check failed."),
+      apiKey: {
+        configured: Boolean(apiKey),
+        ...(apiKey ? { maskedApiKey: this.maskSecret(apiKey) } : {}),
+      },
+      check: healthCheck,
+    };
   }
 
   async getConversations(
@@ -179,6 +273,12 @@ export class ApiService implements OnModuleInit {
         user.role === "admin"
           ? { status: "active" }
           : { userId: user.id, status: "active" },
+      include: {
+        tasks: {
+          orderBy: { updatedAt: "desc" },
+          take: 1,
+        },
+      },
       orderBy: { updatedAt: "desc" },
     });
 
@@ -212,6 +312,44 @@ export class ApiService implements OnModuleInit {
     return { conversation: await this.getConversationDetail(user, id) };
   }
 
+  async archiveConversation(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<ArchiveConversationResponse> {
+    const conversation = await this.assertMutableConversation(user, id);
+    const archived = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        status: "archived",
+        metadata: {
+          ...this.asRecord(conversation.metadata),
+          archivedAt: new Date().toISOString(),
+        } as Prisma.InputJsonObject,
+      },
+    });
+
+    return { conversation: this.toConversationSummary(archived) };
+  }
+
+  async deleteConversation(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<DeleteConversationResponse> {
+    const conversation = await this.assertMutableConversation(user, id);
+    const deleted = await this.prisma.conversation.update({
+      where: { id: conversation.id },
+      data: {
+        status: "deleted",
+        metadata: {
+          ...this.asRecord(conversation.metadata),
+          deletedAt: new Date().toISOString(),
+        } as Prisma.InputJsonObject,
+      },
+    });
+
+    return { conversation: this.toConversationSummary(deleted) };
+  }
+
   async getConversationTaskEvents(
     user: AuthenticatedUser,
     id: string,
@@ -239,8 +377,22 @@ export class ApiService implements OnModuleInit {
       );
     }
 
+    const userSettings = await this.resolveUserSettings(user.id);
+    if (!userSettings.enabledModelIds.includes(input.model)) {
+      throw new BadRequestException(
+        `Model ${input.model} is not enabled in your settings.`,
+      );
+    }
+
     const model = await this.findEnabledModel(input.model, capability);
     if (!model) {
+      const configuredModel = await this.findConfiguredModel(input.model);
+      if (configuredModel && !this.isTaskSupportedModel(configuredModel)) {
+        throw new BadRequestException(
+          `Model ${input.model} is registered but this backend does not support its Yunwu API family yet. Enable only models marked taskSupported for user tasks.`,
+        );
+      }
+
       throw new BadRequestException(
         `Model ${input.model} does not support ${capability}.`,
       );
@@ -328,6 +480,7 @@ export class ApiService implements OnModuleInit {
             model: input.model,
             prompt: input.prompt,
             assetIds: requestedAssetIds,
+            providerBaseUrl: userSettings.baseUrl,
             params: this.toJsonRecord(input.params),
           } satisfies Prisma.InputJsonObject,
         },
@@ -347,6 +500,7 @@ export class ApiService implements OnModuleInit {
               model: input.model,
               prompt: input.prompt,
               assetIds: requestedAssetIds,
+              providerBaseUrl: userSettings.baseUrl,
               params: this.toJsonRecord(input.params),
             }),
             ...(sourceTask?.id ? { sourceTaskId: sourceTask.id } : {}),
@@ -404,6 +558,12 @@ export class ApiService implements OnModuleInit {
       await Promise.all([
         this.prisma.conversation.findMany({
           where: { userId: user.id, status: "active" },
+          include: {
+            tasks: {
+              orderBy: { updatedAt: "desc" },
+              take: 1,
+            },
+          },
           orderBy: { updatedAt: "desc" },
           take: 6,
         }),
@@ -598,7 +758,7 @@ export class ApiService implements OnModuleInit {
     return { events: events.map((event) => this.toTaskEventRecord(event)) };
   }
 
-  async retryFailedTask(
+  async retryTask(
     user: AuthenticatedUser,
     id: string,
   ): Promise<RetryTaskResponse> {
@@ -614,20 +774,14 @@ export class ApiService implements OnModuleInit {
     if (!task) {
       throw new NotFoundException("Task not found.");
     }
-    if (task.status !== "failed") {
-      throw new BadRequestException(
-        `Only failed tasks can be retried. Current status: ${task.status}.`,
-      );
-    }
     if (!task.userId || !task.conversationId) {
       throw new BadRequestException(
         "Task cannot be retried because user or conversation context is missing.",
       );
     }
-    const failure = this.toTaskFailureRecord(task);
-    if (!failure?.retryable) {
+    if (!this.isRetryableTaskStatus(task.status)) {
       throw new BadRequestException(
-        "Only retryable failed tasks can be retried from the client.",
+        this.getTaskRetryBlockedMessage(task.status),
       );
     }
 
@@ -661,7 +815,7 @@ export class ApiService implements OnModuleInit {
             details: {
               title: "Retry requested",
               detail:
-                "A retry was requested for this failed task and a new task was queued.",
+                "A retry was requested for this task and a new task was queued.",
               retryTaskId: created.id,
               previousStatus: task.status,
               ...(previousError ? { errorMessage: previousError } : {}),
@@ -674,7 +828,7 @@ export class ApiService implements OnModuleInit {
             summary: "Retry task created.",
             details: {
               title: "Retry task created",
-              detail: "This task was created from a previous failed task.",
+              detail: "This task was created from a previous task.",
               retryOfTaskId: task.id,
               ...(previousError ? { errorMessage: previousError } : {}),
             },
@@ -723,6 +877,13 @@ export class ApiService implements OnModuleInit {
     };
   }
 
+  async retryFailedTask(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<RetryTaskResponse> {
+    return this.retryTask(user, id);
+  }
+
   async getAdminModelCapabilities(): Promise<AdminModelCapabilitiesResponse> {
     const rows = await this.prisma.modelCapability.findMany({
       orderBy: [{ provider: "asc" }, { model: "asc" }, { modality: "asc" }],
@@ -766,14 +927,14 @@ export class ApiService implements OnModuleInit {
       await this.providerState.getState(),
     );
 
-    return { provider: this.buildProviderStatus(rows, { state }) };
+    return { provider: await this.buildProviderStatus(rows, { state }) };
   }
 
   async checkAdminProvider(): Promise<ProviderCheckResponse> {
     const rows = await this.getProviderModelCapabilities();
     const startedAt = Date.now();
     const probe = await this.openaiCompatible.checkProviderModels();
-    const check = this.buildProviderHealthCheck(rows, probe, {
+    const check = await this.buildProviderHealthCheck(rows, probe, {
       latencyMs: Date.now() - startedAt,
     });
     const state = await this.providerState.persistCheck({
@@ -784,7 +945,7 @@ export class ApiService implements OnModuleInit {
     const refreshedState = await this.providerAlerts.refreshAlerts(state);
 
     return {
-      provider: this.buildProviderStatus(rows, {
+      provider: await this.buildProviderStatus(rows, {
         check,
         probe,
         state: refreshedState,
@@ -838,7 +999,7 @@ export class ApiService implements OnModuleInit {
         input.prompt?.trim() ||
         "Provider smoke test: generate a simple diagnostic image.",
       params: {
-        size: "512x512",
+        size: "auto",
         n: 1,
         ...this.toJsonRecord(input.params),
       },
@@ -855,7 +1016,7 @@ export class ApiService implements OnModuleInit {
       test: {
         capability: "image.generate",
         model,
-        mode: this.openaiCompatible.getProviderProfile().mode,
+        mode: (await this.openaiCompatible.getProviderProfile()).mode,
         queuedAt: queuedAt.toISOString(),
         lastTest: this.toProviderLastTest(state),
       },
@@ -871,11 +1032,198 @@ export class ApiService implements OnModuleInit {
     }
 
     const rows = await this.getProviderModelCapabilities();
-    return { provider: this.buildProviderStatus(rows, { state }) };
+    return { provider: await this.buildProviderStatus(rows, { state }) };
+  }
+
+  async updateAdminProviderConfig(
+    input: UpdateProviderConfigDto,
+  ): Promise<ProviderAdminResponse> {
+    await this.providerConfig.updateBaseUrl(input.baseUrl);
+    const rows = await this.getProviderModelCapabilities();
+    const state = await this.providerAlerts.refreshAlerts(
+      await this.providerState.getState(),
+    );
+
+    return { provider: await this.buildProviderStatus(rows, { state }) };
   }
 
   async assertConversationAccess(user: AuthenticatedUser, id: string) {
     await this.getConversationDetail(user, id);
+  }
+
+  private async assertMutableConversation(user: AuthenticatedUser, id: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: user.role === "admin" ? { id } : { id, userId: user.id },
+    });
+    if (!conversation) {
+      throw new NotFoundException("Conversation not found.");
+    }
+
+    return conversation;
+  }
+
+  private async resolveUserSettings(
+    userId: string,
+  ): Promise<ResolvedUserSettings> {
+    const rows = await this.prisma.$queryRaw<
+      Array<{
+        baseUrl: string;
+        providerApiKey: string | null;
+        enabledModelIds: unknown;
+        ui: unknown;
+      }>
+    >(
+      Prisma.sql`
+        SELECT
+          "base_url" AS "baseUrl",
+          "provider_api_key" AS "providerApiKey",
+          "enabled_model_ids" AS "enabledModelIds",
+          "ui"
+        FROM "user_settings"
+        WHERE "user_id" = ${userId}
+        LIMIT 1
+      `,
+    );
+    const row = rows[0];
+
+    if (!row) {
+      return {
+        baseUrl: await this.providerConfig.getBaseUrl(),
+        enabledModelIds: [...DEFAULT_YUNWU_MODEL_IDS],
+        ui: {},
+      };
+    }
+
+    return {
+      baseUrl: this.normalizeSupportedBaseUrl(row.baseUrl),
+      providerApiKey: row.providerApiKey?.trim() || undefined,
+      enabledModelIds: this.normalizeEnabledModelIds(
+        this.asStringArray(row.enabledModelIds) ?? [],
+      ),
+      ui: this.asRecord(row.ui),
+    };
+  }
+
+  private async persistUserSettings(
+    userId: string,
+    settings: ResolvedUserSettings,
+  ) {
+    await this.prisma.$executeRaw(
+      Prisma.sql`
+        INSERT INTO "user_settings" (
+          "id",
+          "user_id",
+          "base_url",
+          "provider_api_key",
+          "enabled_model_ids",
+          "ui",
+          "created_at",
+          "updated_at"
+        )
+        VALUES (
+          ${userId},
+          ${userId},
+          ${settings.baseUrl},
+          ${settings.providerApiKey ?? null},
+          CAST(${JSON.stringify(settings.enabledModelIds)} AS JSONB),
+          CAST(${JSON.stringify(settings.ui)} AS JSONB),
+          NOW(),
+          NOW()
+        )
+        ON CONFLICT ("user_id") DO UPDATE SET
+          "base_url" = EXCLUDED."base_url",
+          "provider_api_key" = EXCLUDED."provider_api_key",
+          "enabled_model_ids" = EXCLUDED."enabled_model_ids",
+          "ui" = EXCLUDED."ui",
+          "updated_at" = NOW()
+      `,
+    );
+  }
+
+  private async toUserSettingsResponse(settings: ResolvedUserSettings) {
+    return {
+      baseUrl: settings.baseUrl,
+      supportedBaseUrls: [...YUNWU_BASE_URLS],
+      enabledModelIds: settings.enabledModelIds,
+      providerApiKey: {
+        configured: Boolean(settings.providerApiKey),
+        ...(settings.providerApiKey
+          ? { maskedApiKey: this.maskSecret(settings.providerApiKey) }
+          : {}),
+      },
+      ui: settings.ui,
+    };
+  }
+
+  private toProviderHealthCheckForUserCheck(
+    check: Awaited<ReturnType<OpenAICompatibleService["checkProviderModels"]>>,
+    apiKeyConfigured: boolean,
+  ) {
+    return {
+      checkedAt: new Date().toISOString(),
+      status: check.error ? ("error" as const) : ("ok" as const),
+      mode: apiKeyConfigured ? ("real" as const) : ("mock" as const),
+      baseUrlReachable: check.baseUrlReachable,
+      apiKeyConfigured,
+      modelsSource: check.modelsSource,
+      configuredModelCount: 0,
+      enabledModelCount: 0,
+      supportedCapabilities: [],
+      defaultModels: {},
+      ...(check.error ? { error: check.error } : {}),
+      ...(check.remoteModelIds
+        ? { availableModelCount: check.remoteModelIds.length }
+        : {}),
+    };
+  }
+
+  private normalizeApiKey(apiKey: string | null) {
+    if (apiKey === null) {
+      return undefined;
+    }
+
+    const normalized = apiKey.trim();
+    if (!normalized) {
+      throw new BadRequestException("provider API key cannot be empty.");
+    }
+
+    return normalized;
+  }
+
+  private maskSecret(value: string) {
+    if (value.length <= 8) {
+      return "****";
+    }
+
+    return `${value.slice(0, 4)}...${value.slice(-4)}`;
+  }
+
+  private normalizeSupportedBaseUrl(baseUrl: string) {
+    const normalized = baseUrl.trim().replace(/\/$/, "");
+    if (!YUNWU_BASE_URLS.includes(normalized as never)) {
+      throw new BadRequestException(
+        `Unsupported Yunwu base_url. Use one of: ${YUNWU_BASE_URLS.join(", ")}.`,
+      );
+    }
+
+    return normalized;
+  }
+
+  private normalizeEnabledModelIds(modelIds: string[]) {
+    const knownModelIds = new Set(YUNWU_MODEL_DEFINITIONS.map((model) => model.id));
+    const invalidModel = modelIds.find((modelId) => !knownModelIds.has(modelId));
+    if (invalidModel) {
+      throw new BadRequestException(
+        `Unknown Yunwu model id in enabledModelIds: ${invalidModel}.`,
+      );
+    }
+
+    return [
+      ...new Set([
+        ...DEFAULT_YUNWU_MODEL_IDS,
+        ...modelIds.filter((modelId) => knownModelIds.has(modelId)),
+      ]),
+    ];
   }
 
   private async getProviderModelCapabilities() {
@@ -885,7 +1233,7 @@ export class ApiService implements OnModuleInit {
     });
   }
 
-  private buildProviderStatus(
+  private async buildProviderStatus(
     rows: ModelCapability[],
     input: {
       check?: ProviderHealthCheck;
@@ -893,13 +1241,13 @@ export class ApiService implements OnModuleInit {
       state?: ProviderOperationalStateRecord | null;
     } = {},
   ) {
-    const profile = this.openaiCompatible.getProviderProfile();
+    const profile = await this.openaiCompatible.getProviderProfile();
     const remoteModelIds =
       input.probe?.remoteModelIds ??
       this.providerState.getRemoteModelIds(input.state ?? null);
     const check =
       input.check ??
-      this.toPersistedProviderHealthCheck(rows, input.state ?? null);
+      (await this.toPersistedProviderHealthCheck(rows, input.state ?? null));
     const models = this.toProviderModelSummaries(rows, remoteModelIds);
     const modelAvailability = this.buildModelAvailability(
       models,
@@ -911,6 +1259,7 @@ export class ApiService implements OnModuleInit {
 
     return {
       ...profile,
+      supportedBaseUrls: [...YUNWU_BASE_URLS],
       supportedCapabilities: this.supportedCapabilitiesFrom(rows),
       defaultModels: this.resolveDefaultModels(rows),
       models,
@@ -928,12 +1277,12 @@ export class ApiService implements OnModuleInit {
     };
   }
 
-  private buildProviderHealthCheck(
+  private async buildProviderHealthCheck(
     rows: ModelCapability[],
     probe: OpenAICompatibleProviderProbeResult,
     input: { latencyMs?: number } = {},
-  ): ProviderHealthCheck {
-    const profile = this.openaiCompatible.getProviderProfile();
+  ): Promise<ProviderHealthCheck> {
+    const profile = await this.openaiCompatible.getProviderProfile();
     const models = this.toProviderModelSummaries(rows, probe.remoteModelIds);
     const configuredModelCount = models.length;
     const enabledModelCount = models.filter((model) => model.enabled).length;
@@ -989,12 +1338,12 @@ export class ApiService implements OnModuleInit {
     };
   }
 
-  private toPersistedProviderHealthCheck(
+  private async toPersistedProviderHealthCheck(
     rows: ModelCapability[],
     state: ProviderOperationalStateRecord | null,
-  ): ProviderHealthCheck | undefined {
+  ): Promise<ProviderHealthCheck | undefined> {
     const remoteModelIds = this.providerState.getRemoteModelIds(state);
-    const profile = this.openaiCompatible.getProviderProfile();
+    const profile = await this.openaiCompatible.getProviderProfile();
     const models = this.toProviderModelSummaries(rows, remoteModelIds);
     const enabledModelCount = models.filter((model) => model.enabled).length;
     const modelsSource =
@@ -1201,6 +1550,7 @@ export class ApiService implements OnModuleInit {
       ...new Set(
         rows
           .filter((row) => row.enabled)
+          .filter((row) => this.isTaskSupportedModel(row))
           .flatMap((row) => this.capabilitiesOf(row)),
       ),
     ];
@@ -1210,11 +1560,10 @@ export class ApiService implements OnModuleInit {
     rows: ModelCapability[],
   ): Partial<Record<CapabilityType, string>> {
     const imageGenerate = this.findPreferredModel(rows, "image.generate", [
-      "flux-schnell",
-      "gpt-image-1",
+      ...DEFAULT_YUNWU_MODEL_IDS,
     ]);
     const imageEdit = this.findPreferredModel(rows, "image.edit", [
-      "gpt-image-1",
+      "gpt-image-2",
     ]);
 
     return {
@@ -1231,7 +1580,9 @@ export class ApiService implements OnModuleInit {
     const candidates = rows
       .filter(
         (row) =>
-          row.enabled && this.capabilitiesOf(row).includes(capability),
+          row.enabled &&
+          this.isTaskSupportedModel(row) &&
+          this.capabilitiesOf(row).includes(capability),
       )
       .map((row) => row.model);
 
@@ -1243,22 +1594,26 @@ export class ApiService implements OnModuleInit {
 
   private async ensureDefaultModels() {
     await Promise.all(
-      DEFAULT_OPENAI_COMPATIBLE_MODELS.map((model) =>
+      YUNWU_MODEL_DEFINITIONS.map((model) =>
         this.prisma.modelCapability.upsert({
           where: {
             provider_model_modality: {
               provider: OPENAI_COMPATIBLE_PROVIDER,
-              model: model.model,
+              model: model.id,
               modality: "image",
             },
           },
-          update: {},
+          update: {
+            capabilities: model.capabilities,
+            metadata: this.toModelMetadata(model),
+          },
           create: {
             provider: OPENAI_COMPATIBLE_PROVIDER,
-            model: model.model,
+            model: model.id,
             modality: "image",
             capabilities: model.capabilities,
-            metadata: model.metadata,
+            enabled: model.defaultEnabled,
+            metadata: this.toModelMetadata(model),
           },
         }),
       ),
@@ -1270,11 +1625,23 @@ export class ApiService implements OnModuleInit {
       where: {
         provider: OPENAI_COMPATIBLE_PROVIDER,
         model,
-        enabled: true,
       },
     });
 
-    return rows.find((row) => this.capabilitiesOf(row).includes(capability));
+    return rows.find(
+      (row) =>
+        this.isTaskSupportedModel(row) &&
+        this.capabilitiesOf(row).includes(capability),
+    );
+  }
+
+  private async findConfiguredModel(model: string) {
+    return this.prisma.modelCapability.findFirst({
+      where: {
+        provider: OPENAI_COMPATIBLE_PROVIDER,
+        model,
+      },
+    });
   }
 
   private async getConversationDetail(
@@ -1282,7 +1649,10 @@ export class ApiService implements OnModuleInit {
     id: string,
   ): Promise<ConversationDetail> {
     const conversation = await this.prisma.conversation.findFirst({
-      where: user.role === "admin" ? { id } : { id, userId: user.id },
+      where:
+        user.role === "admin"
+          ? { id }
+          : { id, userId: user.id, status: { not: "deleted" } },
       include: {
         messages: { include: { assets: true }, orderBy: { createdAt: "asc" } },
         tasks: {
@@ -1335,13 +1705,25 @@ export class ApiService implements OnModuleInit {
   }
 
   private toConversationSummary(
-    conversation: Conversation,
+    conversation: Conversation & {
+      tasks?: Array<{
+        input?: unknown;
+        updatedAt?: Date;
+        createdAt?: Date;
+      }>;
+    },
   ): ConversationSummary {
     const metadata = this.asRecord(conversation.metadata);
+    const latestTask = this.getLatestConversationTask(conversation.tasks ?? []);
+    const latestTaskModelId = latestTask
+      ? this.asOptionalString(this.asRecord(latestTask.input).model)
+      : undefined;
 
     return {
       id: conversation.id,
       title: conversation.title ?? "Untitled conversation",
+      status: conversation.status,
+      ...(latestTaskModelId ? { latestTaskModelId } : {}),
       metadata:
         Object.keys(metadata).length > 0
           ? (metadata as ConversationSummary["metadata"])
@@ -1390,7 +1772,7 @@ export class ApiService implements OnModuleInit {
       sourceTaskId: task.sourceTaskId ?? undefined,
       sourceAction: task.sourceAction ?? undefined,
       failure: failure ?? undefined,
-      canRetry: Boolean(task.status === "failed" && failure?.retryable),
+      canRetry: this.isRetryableTaskStatus(task.status),
       progress: task.progress,
       conversationId: task.conversationId ?? undefined,
       conversationTitle: task.conversation?.title ?? undefined,
@@ -1476,6 +1858,7 @@ export class ApiService implements OnModuleInit {
   private toModelRecord(row: ModelCapability): ModelRecord {
     const metadata = this.asRecord(row.metadata);
     const capabilities = this.capabilitiesOf(row);
+    const taskSupported = this.isTaskSupportedModel(row);
 
     return {
       id: row.model,
@@ -1485,13 +1868,58 @@ export class ApiService implements OnModuleInit {
           ? "image-editing"
           : "image-generation",
       capabilityTypes: capabilities,
-      enabled: row.enabled,
+      enabled: true,
+      taskSupported,
+      status: taskSupported ? "available" : "unsupported",
+      statusMessage: taskSupported
+        ? undefined
+        : "This model is registered but its Yunwu API family is not implemented for task submission yet.",
       provider: row.provider,
       description:
         typeof metadata.description === "string"
           ? metadata.description
           : undefined,
     };
+  }
+
+  private getLatestConversationTask(
+    tasks: Array<{
+      input?: unknown;
+      updatedAt?: Date;
+      createdAt?: Date;
+    }>,
+  ) {
+    return tasks
+      .slice()
+      .sort((a, b) => {
+        const aTime = a.updatedAt?.getTime?.() ?? a.createdAt?.getTime?.() ?? 0;
+        const bTime = b.updatedAt?.getTime?.() ?? b.createdAt?.getTime?.() ?? 0;
+        return bTime - aTime;
+      })[0];
+  }
+
+  private toModelMetadata(model: YunwuModelDefinition): Prisma.InputJsonObject {
+    return {
+      name: model.name,
+      type: model.capabilities.includes("image.edit")
+        ? "image-editing"
+        : "image-generation",
+      description: model.description,
+      family: model.family,
+      taskSupported: model.taskSupported,
+      defaultEnabled: model.defaultEnabled,
+      source: "test_provider.txt",
+    };
+  }
+
+  private isTaskSupportedModel(row: ModelCapability) {
+    const metadata = this.asRecord(row.metadata);
+    if (metadata.taskSupported === true) {
+      return true;
+    }
+
+    const definition = getYunwuModelDefinition(row.model);
+    return Boolean(definition?.taskSupported);
   }
 
   private toAssetRecord(asset: Asset): AssetRecord {
@@ -1565,6 +1993,7 @@ export class ApiService implements OnModuleInit {
       promptLength: prompt.length,
       assetCount: input.assetIds?.length ?? 0,
       assetIds: input.assetIds ?? [],
+      providerBaseUrl: input.providerBaseUrl,
       params: this.summarizeParams(input.params),
     };
   }
@@ -1753,6 +2182,18 @@ export class ApiService implements OnModuleInit {
       ...(detail ? { detail } : {}),
       ...(statusCode !== undefined ? { statusCode } : {}),
     };
+  }
+
+  private isRetryableTaskStatus(status: string) {
+    return status === "succeeded" || status === "failed";
+  }
+
+  private getTaskRetryBlockedMessage(status: string) {
+    if (status === "queued" || status === "submitted" || status === "running") {
+      return "This task is still in progress and cannot be retried yet.";
+    }
+
+    return `Only completed or failed tasks can be retried. Current status: ${status}.`;
   }
 
   private summarizeParams(params?: Record<string, unknown>) {

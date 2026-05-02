@@ -10,6 +10,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Res,
   Sse,
   StreamableFile,
@@ -21,14 +22,17 @@ import { FileInterceptor } from "@nestjs/platform-express";
 import { createReadStream } from "node:fs";
 import type {
   ConversationEvent,
+  ArchiveConversationResponse,
   CapabilitiesResponse,
   ConversationTaskEventsResponse,
   ConversationResponse,
   ConversationsResponse,
   CreateTaskResponse,
+  DeleteConversationResponse,
   DeleteLibraryAssetResponse,
   HistoryResponse,
   HomeResponse,
+  AdminLogsResponse,
   AdminModelCapabilitiesResponse,
   AdminModelCapabilityResponse,
   LibraryResponse,
@@ -40,6 +44,8 @@ import type {
   TasksResponse,
   TaskEventsResponse,
   TaskResponse,
+  UserApiKeyCheckResponse,
+  UserSettingsResponse,
   UploadAssetResponse,
 } from "./api.types";
 import { ApiService } from "./api.service";
@@ -48,10 +54,17 @@ import { ConversationEventsService } from "./conversation-events.service";
 import { CurrentUser } from "../auth/current-user.decorator";
 import { Roles } from "../auth/roles.decorator";
 import type { AuthenticatedUser } from "../auth/auth.types";
+import { CheckUserApiKeyDto } from "./dto/check-user-api-key.dto";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateTaskDto } from "./dto/create-task.dto";
 import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
+import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
+import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";
+import {
+  AppLoggerService,
+  type AppLogLevelQuery,
+} from "../logging/app-logger.service";
 import type { UploadedAssetFile } from "./upload.types";
 
 @Controller("api")
@@ -60,16 +73,42 @@ export class ApiController {
     private readonly api: ApiService,
     private readonly assetUpload: AssetUploadService,
     private readonly conversationEvents: ConversationEventsService,
+    private readonly appLogger: AppLoggerService,
   ) {}
 
   @Get("capabilities")
-  getCapabilities(): Promise<CapabilitiesResponse> {
-    return this.api.getCapabilities();
+  getCapabilities(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<CapabilitiesResponse> {
+    return this.api.getCapabilities(user);
   }
 
   @Get("models")
-  getModels(): Promise<ModelsResponse> {
-    return this.api.getModels();
+  getModels(@CurrentUser() user: AuthenticatedUser): Promise<ModelsResponse> {
+    return this.api.getModels(user);
+  }
+
+  @Get("settings")
+  getSettings(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<UserSettingsResponse> {
+    return this.api.getSettings(user);
+  }
+
+  @Patch("settings")
+  updateSettings(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() input: UpdateUserSettingsDto,
+  ): Promise<UserSettingsResponse> {
+    return this.api.updateSettings(user, input);
+  }
+
+  @Post("settings/api-key/check")
+  checkUserApiKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() input: CheckUserApiKeyDto,
+  ): Promise<UserApiKeyCheckResponse> {
+    return this.api.checkUserApiKey(user, input);
   }
 
   @Get("conversations")
@@ -93,6 +132,22 @@ export class ApiController {
     @Param("id") id: string,
   ): Promise<ConversationResponse> {
     return this.api.getConversation(user, id);
+  }
+
+  @Patch("conversations/:id/archive")
+  archiveConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ): Promise<ArchiveConversationResponse> {
+    return this.api.archiveConversation(user, id);
+  }
+
+  @Delete("conversations/:id")
+  deleteConversation(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("id") id: string,
+  ): Promise<DeleteConversationResponse> {
+    return this.api.deleteConversation(user, id);
   }
 
   @Get("home")
@@ -204,7 +259,7 @@ export class ApiController {
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
   ): Promise<RetryTaskResponse> {
-    return this.api.retryFailedTask(user, id);
+    return this.api.retryTask(user, id);
   }
 
   @Get("tasks/:id")
@@ -221,6 +276,20 @@ export class ApiController {
     return this.api.getAdminModelCapabilities();
   }
 
+  @Get("admin/logs")
+  @Roles("admin")
+  getAdminLogs(
+    @Query("level") level?: AppLogLevelQuery,
+    @Query("limit") limit?: string,
+    @Query("search") search?: string,
+  ): AdminLogsResponse {
+    return this.appLogger.queryLogs({
+      level,
+      limit: limit === undefined ? undefined : Number(limit),
+      search,
+    });
+  }
+
   @Get("admin/provider")
   @Roles("admin")
   getAdminProvider(): Promise<ProviderAdminResponse> {
@@ -231,6 +300,14 @@ export class ApiController {
   @Roles("admin")
   checkAdminProvider(): Promise<ProviderCheckResponse> {
     return this.api.checkAdminProvider();
+  }
+
+  @Patch("admin/provider/config")
+  @Roles("admin")
+  updateAdminProviderConfig(
+    @Body() input: UpdateProviderConfigDto,
+  ): Promise<ProviderAdminResponse> {
+    return this.api.updateAdminProviderConfig(input);
   }
 
   @Post("admin/provider/test-generate")

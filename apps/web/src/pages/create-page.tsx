@@ -116,7 +116,7 @@ export function CreatePage() {
 
   const composerHint = useMemo(() => {
     if (!sourceTask) {
-      return "首次提交不会提前创建空会话，成功后会自动进入新工作台。";
+      return "提交成功后会直接进入对应工作台。";
     }
 
     if (sourceTask.failure?.category === "invalid_request") {
@@ -187,23 +187,23 @@ export function CreatePage() {
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
-      <Card className="border-white/10 bg-white/[0.03]">
+      <Card>
         <CardHeader>
           <div className="flex items-center gap-2">
             <Wand2 className="h-5 w-5 text-primary" />
-            <CardTitle>创建页</CardTitle>
+            <CardTitle>发起创作</CardTitle>
           </div>
           <CardDescription>
-            支持首次文生图、上传图编辑、来源任务预填，以及提交后跳转到对应工作台。
+            输入提示词、上传参考图或基于历史任务继续，提交后进入工作台查看进展和结果。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
             <span>模式：{mode === "variant" ? "生成变体" : "再编辑 / 调整后继续"}</span>
-            <span>会话：{fork ? "提交后创建新会话" : sourceTask?.conversationTitle ?? "首次提交懒创建"}</span>
-            {sourceTask ? <span>来源任务：{sourceTask.id}</span> : null}
+            <span>去向：{fork ? "新工作台" : sourceTask?.conversationTitle ?? "新工作台"}</span>
+            {sourceTask ? <span>来源：{sourceTask.id}</span> : null}
           </div>
-          <div className="rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-4 py-3 text-sm text-muted-foreground">
             {composerHint}
           </div>
           {error ? (
@@ -215,7 +215,7 @@ export function CreatePage() {
       </Card>
 
       {sourceTask ? (
-        <Card className="border-white/10 bg-white/[0.03]">
+        <Card>
           <CardHeader>
             <CardTitle>来源任务</CardTitle>
             <CardDescription>
@@ -250,19 +250,19 @@ export function CreatePage() {
         isUploading={isUploading}
         initialDraft={initialDraft}
         submitLabel={fork ? "Fork 并提交" : "提交并进入工作台"}
-        placeholder="输入提示词或调整说明。首次提交时后端会懒创建会话。"
+        placeholder="输入提示词或调整说明，提交后进入工作台。"
         onUpload={handleUpload}
         onRemoveUpload={handleRemoveUpload}
         onSubmit={handleSubmit}
       />
 
       {!loading && !sourceTask ? (
-        <Card className="border-dashed border-white/10 bg-white/[0.02]">
+        <Card className="border-dashed bg-[hsl(var(--surface-container-low)/0.82)]">
           <CardContent className="flex items-center justify-between gap-4 p-5">
             <div>
-              <p className="text-sm font-medium text-foreground">首次创作路径</p>
+              <p className="text-sm font-medium text-foreground">准备开始</p>
               <p className="mt-1 text-sm text-muted-foreground">
-                直接提交即可，新会话会在后端任务创建时自动生成。
+                直接提交即可，工作台会自动打开并展示进展。
               </p>
             </div>
             <Button variant="outline" size="sm" onClick={() => navigate("/")}>

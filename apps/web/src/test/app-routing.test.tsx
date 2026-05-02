@@ -79,6 +79,10 @@ vi.mock("@/pages/library-page", () => ({
   LibraryPage: () => <div>library-page</div>,
 }));
 
+vi.mock("@/pages/settings-page", () => ({
+  SettingsPage: () => <div>settings-page</div>,
+}));
+
 vi.mock("@/pages/workspace-page", () => ({
   WorkspacePage: () => {
     const location = useLocation();
@@ -167,6 +171,14 @@ describe("app routing", () => {
 
     cleanup();
     render(
+      <MemoryRouter initialEntries={["/settings"]}>
+        <RouteHarness />
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText("settings-page")).toBeTruthy();
+
+    cleanup();
+    render(
       <MemoryRouter initialEntries={["/workspace/conv_123"]}>
         <RouteHarness />
       </MemoryRouter>,
@@ -174,6 +186,17 @@ describe("app routing", () => {
     expect(
       await screen.findByText("workspace-page:/workspace/conv_123"),
     ).toBeTruthy();
+  });
+
+  it("does not expose a standalone session management route", async () => {
+    render(
+      <MemoryRouter initialEntries={["/sessions"]}>
+        <RouteHarness />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText("home-page")).toBeTruthy();
+    expect(screen.getByTestId("location").textContent).toBe("/");
   });
 
   it("keeps admin shell separate and blocks members from admin route", async () => {

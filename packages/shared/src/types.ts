@@ -32,6 +32,8 @@ export interface TaskMessage {
 export interface ConversationSummary {
   id: string;
   title: string;
+  status?: "active" | "archived" | "deleted";
+  latestTaskModelId?: string;
   metadata?: ConversationMetadata;
   updatedAt: string;
   createdAt: string;
@@ -64,8 +66,54 @@ export interface ModelRecord {
   type: ModelType;
   capabilityTypes: CapabilityType[];
   enabled: boolean;
+  taskSupported?: boolean;
+  status?: "available" | "unsupported";
+  statusMessage?: string;
   provider?: string;
   description?: string;
+}
+
+export interface UserSettingsRecord {
+  baseUrl: string;
+  supportedBaseUrls: string[];
+  enabledModelIds: string[];
+  providerApiKey: {
+    configured: boolean;
+    maskedApiKey?: string;
+  };
+  ui: Record<string, unknown>;
+}
+
+export interface UserSettingsResponse {
+  settings: UserSettingsRecord;
+}
+
+export interface UserApiKeyCheckResponse {
+  ok: boolean;
+  status: ProviderHealthStatus;
+  message: string;
+  apiKey: {
+    configured: boolean;
+    maskedApiKey?: string;
+  };
+  check: ProviderHealthCheck;
+}
+
+export type AppLogLevel = "error" | "warn" | "log" | "debug" | "verbose";
+
+export interface AppLogEntry {
+  id: number;
+  timestamp: string;
+  level: AppLogLevel;
+  context?: string;
+  message: string;
+  trace?: string;
+}
+
+export interface AppLogsResponse {
+  logs: AppLogEntry[];
+  total: number;
+  limit: number;
 }
 
 export interface AssetRecord {
@@ -216,6 +264,7 @@ export interface ProviderAdminStatus {
   type: string;
   name: string;
   baseUrl: string;
+  supportedBaseUrls?: string[];
   apiKeyConfigured: boolean;
   maskedApiKey?: string;
   mode: ProviderMode;

@@ -44,7 +44,7 @@ const config = {
                 sm: "calc(var(--radius) - 4px)",
             },
             boxShadow: {
-                panel: "0 24px 80px rgba(3, 7, 18, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.03)",
+                panel: "var(--panel-shadow)",
             },
             backgroundImage: {
                 grid: "radial-gradient(circle at 1px 1px, rgba(148,163,184,0.14) 1px, transparent 0)",

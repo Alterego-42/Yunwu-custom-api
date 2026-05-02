@@ -1,19 +1,30 @@
 import type { ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleDashed,
   Clock3,
+  Download,
   ExternalLink,
   Image as ImageIcon,
   LoaderCircle,
+  X,
   XCircle,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getSourceActionLabel, resolveAssetUrl } from "@/lib/api-mappers";
-import type { UiTask } from "@/lib/api-types";
+import type { UiTask, UiTaskRoundNavigation } from "@/lib/api-types";
+import { cn } from "@/lib/utils";
+
+type TaskRoundNavigation = UiTaskRoundNavigation & {
+  onPrevious?: () => void;
+  onNext?: () => void;
+};
 
 const statusLabel: Record<UiTask["status"], string> = {
   queued: "排队中",
@@ -32,8 +43,8 @@ const statusToneMap: Record<UiTask["status"], string> = {
   running: "border-amber-400/30 bg-amber-400/10 text-amber-100",
   succeeded: "border-emerald-400/30 bg-emerald-400/10 text-emerald-100",
   failed: "border-destructive/40 bg-destructive/10 text-destructive",
-  cancelled: "border-white/10 bg-white/[0.06] text-muted-foreground",
-  expired: "border-white/10 bg-white/[0.06] text-muted-foreground",
+  cancelled: "border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] text-muted-foreground",
+  expired: "border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] text-muted-foreground",
   action_required: "border-fuchsia-400/30 bg-fuchsia-400/10 text-fuchsia-100",
 };
 
@@ -57,15 +68,129 @@ function TaskStatusIcon({ status }: { status: UiTask["status"] }) {
   return <CircleDashed className="h-3.5 w-3.5" />;
 }
 
+function TaskRoundSwitcher({ navigation }: { navigation?: TaskRoundNavigation }) {
+  if (!navigation || navigation.total <= 1) {
+    return null;
+  }
+
+  return (
+    <div
+      className="flex items-center justify-between gap-3 rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-xs text-muted-foreground"
+      data-testid="task-round-switcher"
+    >
+      <span className="shrink-0">重试轮次</span>
+      <div className="inline-flex items-center gap-1 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] px-1 py-0.5">
+        <button
+          type="button"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition hover:bg-[hsl(var(--surface-container-highest)/0.9)] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          aria-label="上一重试轮次"
+          disabled={!navigation.previousTaskId || !navigation.onPrevious}
+          onClick={navigation.onPrevious}
+        >
+          <ChevronLeft className="h-3.5 w-3.5" />
+        </button>
+        <span className="min-w-[2.5rem] text-center font-medium tabular-nums text-foreground">
+          {navigation.index}/{navigation.total}
+        </span>
+        <button
+          type="button"
+          className="inline-flex h-6 w-6 items-center justify-center rounded-full text-muted-foreground transition hover:bg-[hsl(var(--surface-container-highest)/0.9)] hover:text-foreground disabled:pointer-events-none disabled:opacity-40"
+          aria-label="下一重试轮次"
+          disabled={!navigation.nextTaskId || !navigation.onNext}
+          onClick={navigation.onNext}
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function TaskAssetLightbox({
+  asset,
+  assetUrl,
+  onClose,
+}: {
+  asset: NonNullable<UiTask["resultAssets"]>[number];
+  assetUrl: string;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${asset.label} 预览`}
+      onClick={onClose}
+      data-testid="task-asset-lightbox"
+    >
+      <div
+        className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-background shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
+          <div className="min-w-0">
+            <p className="truncate text-sm font-medium text-foreground">{asset.label}</p>
+            <p className="text-xs text-muted-foreground">{asset.mimeType ?? asset.type}</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            <a
+              href={assetUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 px-3 text-xs text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              打开原图
+            </a>
+            <a
+              href={assetUrl}
+              download
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 px-3 text-xs text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+            >
+              <Download className="h-3.5 w-3.5" />
+              下载
+            </a>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+              aria-label="关闭图片预览"
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+        <div className="min-h-0 overflow-auto bg-black/30 p-4">
+          <img src={assetUrl} alt={asset.label} className="mx-auto max-h-[75vh] max-w-full rounded-lg object-contain" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function TaskAssetPreview({
   asset,
 }: {
   asset: NonNullable<UiTask["resultAssets"]>[number];
 }) {
   const assetUrl = resolveAssetUrl(asset.url);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const content = (
     <>
-      <div className="relative aspect-[4/3] overflow-hidden border-b border-white/10 bg-white/[0.03]">
+      <div className="relative aspect-[4/3] overflow-hidden border-b border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))]">
         {assetUrl ? (
           <img
             src={assetUrl}
@@ -90,34 +215,76 @@ export function TaskAssetPreview({
 
   if (assetUrl) {
     return (
-      <a
-        href={assetUrl}
-        rel="noreferrer"
-        className="group overflow-hidden rounded-xl border border-white/10 bg-black/20"
-      >
-        {content}
-      </a>
+      <>
+        <button
+          type="button"
+          className="group overflow-hidden rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] text-left"
+          aria-label={`预览素材 ${asset.label}`}
+          onClick={() => setIsPreviewOpen(true)}
+        >
+          {content}
+        </button>
+        {isPreviewOpen ? (
+          <TaskAssetLightbox asset={asset} assetUrl={assetUrl} onClose={() => setIsPreviewOpen(false)} />
+        ) : null}
+      </>
     );
   }
 
-  return <div className="overflow-hidden rounded-xl border border-white/10 bg-black/20">{content}</div>;
+  return <div className="overflow-hidden rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)]">{content}</div>;
+}
+
+function TaskInputAssetPreview({
+  asset,
+  assetUrl,
+}: {
+  asset: NonNullable<UiTask["inputAssets"]>[number];
+  assetUrl: string;
+}) {
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+
+  return (
+    <>
+      <button
+        type="button"
+        className="inline-flex items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
+        aria-label={`预览参考素材 ${asset.label}`}
+        onClick={() => setIsPreviewOpen(true)}
+      >
+        <ImageIcon className="h-3.5 w-3.5" />
+        <span>{asset.label}</span>
+      </button>
+      {isPreviewOpen ? (
+        <TaskAssetLightbox asset={asset} assetUrl={assetUrl} onClose={() => setIsPreviewOpen(false)} />
+      ) : null}
+    </>
+  );
 }
 
 export function TaskCard({
   task,
   compact = false,
   actions,
+  roundNavigation,
+  isFocused = false,
 }: {
   task: UiTask;
   compact?: boolean;
   actions?: ReactNode;
+  roundNavigation?: TaskRoundNavigation;
+  isFocused?: boolean;
 }) {
   const isActive = task.status === "queued" || task.status === "submitted" || task.status === "running";
   const hasResults = Boolean(task.resultAssets?.length);
   const hasInputs = Boolean(task.inputAssets?.length);
 
   return (
-    <Card className="border-white/10 bg-white/[0.03]">
+    <Card
+      className={cn(
+        "transition-shadow",
+        isFocused ? "ring-1 ring-primary/60 shadow-lg shadow-primary/10" : null,
+      )}
+    >
       <CardHeader className={compact ? "pb-3" : "pb-4"}>
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -135,7 +302,7 @@ export function TaskCard({
       </CardHeader>
       <CardContent className="space-y-4">
         {task.summary ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-foreground">
             {task.summary}
           </div>
         ) : null}
@@ -147,7 +314,7 @@ export function TaskCard({
         ) : null}
 
         {task.failure ? (
-          <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm text-muted-foreground">
+          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-muted-foreground">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-medium text-foreground">
                 {task.failure.title ?? "失败恢复"}
@@ -158,7 +325,7 @@ export function TaskCard({
                 className={
                   task.failure.retryable
                     ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
-                    : "border-white/10 bg-white/[0.06] text-muted-foreground"
+                    : "border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] text-muted-foreground"
                 }
               >
                 {task.failure.retryable ? "可重试" : "需调整参数"}
@@ -187,7 +354,7 @@ export function TaskCard({
         {!compact && hasResults ? (
           <div className="space-y-3">
             <div className="text-xs font-medium text-muted-foreground">结果素材</div>
-            <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
               {task.resultAssets?.map((asset) => <TaskAssetPreview key={asset.id} asset={asset} />)}
             </div>
           </div>
@@ -205,19 +372,15 @@ export function TaskCard({
                 const assetUrl = resolveAssetUrl(asset.url);
 
                 return assetUrl ? (
-                  <a
+                  <TaskInputAssetPreview
                     key={asset.id}
-                    href={assetUrl}
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    <ImageIcon className="h-3.5 w-3.5" />
-                    <span>{asset.label}</span>
-                  </a>
+                    asset={asset}
+                    assetUrl={assetUrl}
+                  />
                 ) : (
                   <div
                     key={asset.id}
-                    className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-black/20 px-3 py-1 text-xs text-muted-foreground"
+                    className="inline-flex items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-1 text-xs text-muted-foreground"
                   >
                     <ImageIcon className="h-3.5 w-3.5" />
                     <span>{asset.label}</span>
@@ -233,6 +396,8 @@ export function TaskCard({
         ) : null}
 
         {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
+
+        <TaskRoundSwitcher navigation={roundNavigation} />
 
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           {isActive ? (
