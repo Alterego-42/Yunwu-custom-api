@@ -13,8 +13,30 @@ if [ "$use_ssl" = "true" ]; then
   scheme="https"
 fi
 
-mc alias set local "${scheme}://${endpoint}:${port}" "${root_user}" "${root_password}"
-mc mb --ignore-existing "local/${bucket}"
-mc anonymous set private "local/${bucket}"
+attempt=1
+until mc alias set local "${scheme}://${endpoint}:${port}" "${root_user}" "${root_password}"; do
+  if [ "$attempt" -ge 30 ]; then
+    echo "Failed to connect to MinIO after ${attempt} attempts."
+    exit 1
+  fi
+  echo "Waiting for MinIO to accept credentials (${attempt}/30)..."
+  attempt=$((attempt + 1))
+  sleep 2
+done
+
+attempt=1
+until mc mb --ignore-existing "local/${bucket}"; do
+  if [ "$attempt" -ge 10 ]; then
+    echo "Failed to ensure MinIO bucket '${bucket}' after ${attempt} attempts."
+    exit 1
+  fi
+  echo "Waiting to create MinIO bucket '${bucket}' (${attempt}/10)..."
+  attempt=$((attempt + 1))
+  sleep 2
+done
+
+if ! mc anonymous set private "local/${bucket}"; then
+  echo "Warning: failed to set bucket '${bucket}' anonymous policy to private; continuing because bucket exists."
+fi
 
 echo "MinIO bucket '${bucket}' is ready."

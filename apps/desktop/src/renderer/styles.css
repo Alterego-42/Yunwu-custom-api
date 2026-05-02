@@ -109,6 +109,10 @@ button:disabled {
   opacity: 0.55;
 }
 
+.hidden {
+  display: none;
+}
+
 button.secondary {
   color: var(--ink);
   background: #eadbc5;

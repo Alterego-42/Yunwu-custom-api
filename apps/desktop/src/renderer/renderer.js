@@ -5,6 +5,8 @@ const elements = {
   services: document.querySelector("#services"),
   dockerCli: document.querySelector("#docker-cli"),
   dockerDaemon: document.querySelector("#docker-daemon"),
+  dockerActionText: document.querySelector("#docker-action-text"),
+  dockerAction: document.querySelector("#docker-action"),
   webUrl: document.querySelector("#web-url"),
   userData: document.querySelector("#user-data"),
   logs: document.querySelector("#logs"),
@@ -32,11 +34,19 @@ function render(status) {
   elements.message.textContent = status.message;
   elements.dockerCli.textContent = status.dockerCli;
   elements.dockerDaemon.textContent = status.dockerDaemon;
+  elements.dockerActionText.textContent = status.dockerAction === "none" ? "-" : status.dockerAction;
   elements.webUrl.textContent = status.webUrl;
   elements.userData.textContent = status.userDataPath || "-";
   elements.phase.textContent = status.phase;
   elements.phase.dataset.phase = status.phase;
   elements.retry.disabled = status.phase === "checking" || status.phase === "starting" || status.phase === "waiting";
+
+  elements.dockerAction.hidden = status.dockerAction === "none";
+  if (status.dockerAction === "start") {
+    elements.dockerAction.textContent = "启动 Docker Desktop";
+  } else if (status.dockerAction === "install") {
+    elements.dockerAction.textContent = "下载/安装 Docker Desktop";
+  }
 
   elements.services.innerHTML = "";
   for (const service of status.services) {
@@ -56,6 +66,13 @@ function render(status) {
 }
 
 elements.retry.addEventListener("click", () => api.retry());
+elements.dockerAction.addEventListener("click", () => {
+  if (elements.dockerAction.textContent === "启动 Docker Desktop") {
+    api.startDocker();
+  } else {
+    api.openDockerDownload();
+  }
+});
 elements.workbench.addEventListener("click", () => api.openWorkbench());
 elements.admin.addEventListener("click", () => api.openAdmin());
 elements.folder.addEventListener("click", () => api.openUserData());

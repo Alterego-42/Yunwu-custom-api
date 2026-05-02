@@ -19,6 +19,7 @@ type DesktopStatus = {
   phase: Phase;
   dockerCli: "unknown" | "ok" | "missing";
   dockerDaemon: "unknown" | "ok" | "stopped";
+  dockerAction: "none" | "start" | "install";
   message: string;
   logs: string[];
   services: ServiceStatus[];
@@ -60,6 +61,7 @@ const preferredPorts = {
 } satisfies RuntimePorts;
 
 let runtimePorts: RuntimePorts = { ...preferredPorts };
+let blockedHostPorts = new Set<number>();
 
 function getRuntimeUrls(): RuntimeUrls {
   const webUrl = `http://127.0.0.1:${runtimePorts.web}`;
@@ -80,6 +82,7 @@ const status: DesktopStatus = {
   phase: "idle",
   dockerCli: "unknown",
   dockerDaemon: "unknown",
+  dockerAction: "none",
   message: "准备启动本地服务。",
   logs: [],
   services: [
@@ -172,6 +175,93 @@ function getResourcePath(...parts: string[]) {
   return join(fallbackRoot, ...rest);
 }
 
+function parsePortList(output: string) {
+  const ports = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const value = Number.parseInt(line.trim(), 10);
+    if (Number.isInteger(value) && value > 0 && value <= 65535) {
+      ports.add(value);
+    }
+  }
+  return ports;
+}
+
+function parseNetstatPorts(output: string) {
+  const ports = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    if (!/\bLISTENING\b/i.test(line)) continue;
+    const match = line.match(/(?:\d{1,3}\.){3}\d{1,3}:(\d+)|\[[^\]]+\]:(\d+)|\*:(\d+)/);
+    const port = Number.parseInt(match?.[1] ?? match?.[2] ?? match?.[3] ?? "", 10);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) {
+      ports.add(port);
+    }
+  }
+  return ports;
+}
+
+function parseNetshExcludedPorts(output: string) {
+  const ports = new Set<number>();
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)/);
+    if (!match) continue;
+    const start = Number.parseInt(match[1], 10);
+    const end = Number.parseInt(match[2], 10);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
+    for (let port = start; port <= end && port <= 65535; port += 1) {
+      ports.add(port);
+    }
+  }
+  return ports;
+}
+
+async function getWindowsUnavailablePorts() {
+  const ports = new Set<number>();
+  if (process.platform !== "win32") {
+    return ports;
+  }
+
+  try {
+    const { stdout } = await runCommand(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "$ErrorActionPreference='SilentlyContinue'; Get-NetTCPConnection | Where-Object { $_.State -in @('Listen','Bound') } | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique"
+      ],
+      { timeoutMs: 8000 }
+    );
+    for (const port of parsePortList(stdout)) ports.add(port);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`Get-NetTCPConnection port check failed, falling back to netstat: ${message}`);
+  }
+
+  try {
+    const { stdout } = await runCommand("netstat.exe", ["-ano", "-p", "tcp"], { timeoutMs: 8000 });
+    for (const port of parseNetstatPorts(stdout)) ports.add(port);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`netstat port check failed: ${message}`);
+  }
+
+  for (const family of ["ipv4", "ipv6"]) {
+    try {
+      const { stdout } = await runCommand(
+        "netsh.exe",
+        ["interface", family, "show", "excludedportrange", "protocol=tcp"],
+        { timeoutMs: 8000 }
+      );
+      for (const port of parseNetshExcludedPorts(stdout)) ports.add(port);
+    } catch {
+      // Some Windows SKUs return an error for IPv6 or when no exclusions exist.
+    }
+  }
+
+  return ports;
+}
+
 function checkPort(port: number) {
   return new Promise<boolean>((resolvePromise) => {
     const server = createServer();
@@ -183,7 +273,15 @@ function checkPort(port: number) {
   });
 }
 
-async function getEphemeralPort(excludedPorts: Set<number>) {
+async function isHostPortAvailable(port: number, selectedPorts: Set<number>, unavailablePorts: Set<number>) {
+  if (selectedPorts.has(port) || blockedHostPorts.has(port) || unavailablePorts.has(port)) {
+    return false;
+  }
+
+  return checkPort(port);
+}
+
+async function getEphemeralPort(selectedPorts: Set<number>, unavailablePorts: Set<number>) {
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const port = await new Promise<number>((resolvePromise, reject) => {
       const server = createServer();
@@ -201,7 +299,7 @@ async function getEphemeralPort(excludedPorts: Set<number>) {
       });
     });
 
-    if (!excludedPorts.has(port)) {
+    if (await isHostPortAvailable(port, selectedPorts, unavailablePorts)) {
       return port;
     }
   }
@@ -209,14 +307,14 @@ async function getEphemeralPort(excludedPorts: Set<number>) {
   throw new Error("Failed to allocate a unique ephemeral port after 20 attempts.");
 }
 
-async function selectPort(name: string, preferredPort: number, selectedPorts: Set<number>) {
-  if (!selectedPorts.has(preferredPort) && (await checkPort(preferredPort))) {
+async function selectPort(name: string, preferredPort: number, selectedPorts: Set<number>, unavailablePorts: Set<number>) {
+  if (await isHostPortAvailable(preferredPort, selectedPorts, unavailablePorts)) {
     selectedPorts.add(preferredPort);
     pushLog(`${name} host port selected: ${preferredPort}.`);
     return preferredPort;
   }
 
-  const port = await getEphemeralPort(selectedPorts);
+  const port = await getEphemeralPort(selectedPorts, unavailablePorts);
   selectedPorts.add(port);
   pushLog(`${name} preferred host port ${preferredPort} is unavailable; selected ${port}.`);
   return port;
@@ -225,13 +323,17 @@ async function selectPort(name: string, preferredPort: number, selectedPorts: Se
 async function selectRuntimePorts() {
   setPhase("checking", "正在探测本机可用端口。");
   const selectedPorts = new Set<number>();
+  const unavailablePorts = await getWindowsUnavailablePorts();
+  if (unavailablePorts.size > 0) {
+    pushLog(`Windows reports ${unavailablePorts.size} TCP ports unavailable; these ports will be avoided.`);
+  }
   runtimePorts = {
-    web: await selectPort("Web", preferredPorts.web, selectedPorts),
-    api: await selectPort("API", preferredPorts.api, selectedPorts),
-    postgres: await selectPort("Postgres", preferredPorts.postgres, selectedPorts),
-    redis: await selectPort("Redis", preferredPorts.redis, selectedPorts),
-    minio: await selectPort("MinIO", preferredPorts.minio, selectedPorts),
-    minioConsole: await selectPort("MinIO Console", preferredPorts.minioConsole, selectedPorts)
+    web: await selectPort("Web", preferredPorts.web, selectedPorts, unavailablePorts),
+    api: await selectPort("API", preferredPorts.api, selectedPorts, unavailablePorts),
+    postgres: await selectPort("Postgres", preferredPorts.postgres, selectedPorts, unavailablePorts),
+    redis: await selectPort("Redis", preferredPorts.redis, selectedPorts, unavailablePorts),
+    minio: await selectPort("MinIO", preferredPorts.minio, selectedPorts, unavailablePorts),
+    minioConsole: await selectPort("MinIO Console", preferredPorts.minioConsole, selectedPorts, unavailablePorts)
   };
 
   const urls = getRuntimeUrls();
@@ -310,8 +412,48 @@ async function writeRuntimeFiles() {
   return { envPath, overridePath };
 }
 
+function getDockerDesktopCandidates() {
+  return [
+    process.env["ProgramFiles"] ? join(process.env["ProgramFiles"], "Docker", "Docker", "Docker Desktop.exe") : "",
+    process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "Docker", "Docker", "Docker Desktop.exe") : "",
+    process.env["LocalAppData"] ? join(process.env["LocalAppData"], "Docker", "Docker Desktop.exe") : ""
+  ].filter(Boolean);
+}
+
+const dockerDesktopDownloadUrl = "https://www.docker.com/products/docker-desktop/";
+
+async function tryStartDockerDesktop() {
+  for (const candidate of getDockerDesktopCandidates()) {
+    if (!existsSync(candidate)) continue;
+    pushLog(`Starting Docker Desktop from ${candidate}.`);
+    spawn(candidate, [], {
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore"
+    }).unref();
+    return true;
+  }
+
+  return false;
+}
+
+async function waitForDockerDaemon(maxWaitMs = 120_000) {
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    try {
+      await runCommand("docker", ["info"], { timeoutMs: 10000 });
+      return true;
+    } catch {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 5000));
+    }
+  }
+
+  return false;
+}
+
 async function checkDocker() {
   setPhase("checking", "正在检测 Docker。");
+  status.dockerAction = "none";
   try {
     await runCommand("docker", ["--version"], { timeoutMs: 8000 });
     status.dockerCli = "ok";
@@ -319,7 +461,12 @@ async function checkDocker() {
     pushLog("Docker CLI is available.");
   } catch (error) {
     status.dockerCli = "missing";
-    setService("Docker CLI", { status: "error", detail: "未找到 docker 命令，请安装 Docker Desktop 并加入 PATH。" });
+    status.dockerAction = "install";
+    setService("Docker CLI", {
+      status: "error",
+      detail: "未找到 docker 命令。请点击下载/安装 Docker Desktop，安装后重试。也可执行：winget install Docker.DockerDesktop"
+    });
+    broadcastStatus();
     throw error;
   }
 
@@ -328,11 +475,68 @@ async function checkDocker() {
     status.dockerDaemon = "ok";
     setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
     pushLog("Docker daemon is reachable.");
-  } catch (error) {
+    return;
+  } catch {
     status.dockerDaemon = "stopped";
-    setService("Docker Daemon", { status: "error", detail: "Docker Desktop 未启动或 daemon 不可用，请启动后重试。" });
-    throw error;
+    status.dockerAction = "start";
+    setService("Docker Daemon", {
+      status: "running",
+      detail: "Docker daemon 未启动，正在尝试自动启动 Docker Desktop。"
+    });
+    broadcastStatus();
   }
+
+  const started = await tryStartDockerDesktop();
+  if (!started) {
+    setService("Docker Daemon", {
+      status: "error",
+      detail: "未找到 Docker Desktop 可执行文件。请点击下载/安装 Docker Desktop。"
+    });
+    broadcastStatus();
+    throw new Error("Docker Desktop executable not found.");
+  }
+
+  const ready = await waitForDockerDaemon();
+  if (!ready) {
+    setService("Docker Daemon", {
+      status: "error",
+      detail: "Docker Desktop 已启动尝试，但 daemon 仍未就绪，请手动确认 Docker Desktop 已完成启动后重试。"
+    });
+    broadcastStatus();
+    throw new Error("Docker daemon did not become ready in time.");
+  }
+
+  status.dockerAction = "none";
+  status.dockerDaemon = "ok";
+  setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
+  pushLog("Docker daemon became reachable after auto-start.");
+}
+
+async function openDockerInstallGuide() {
+  pushLog("Opening Docker Desktop download page.");
+  await shell.openExternal(dockerDesktopDownloadUrl);
+}
+
+async function startDockerDesktopFromUi() {
+  const started = await tryStartDockerDesktop();
+  if (!started) {
+    await openDockerInstallGuide();
+    return;
+  }
+
+  setService("Docker Daemon", {
+    status: "running",
+    detail: "已请求启动 Docker Desktop，正在等待 daemon 就绪。"
+  });
+  broadcastStatus();
+  const ready = await waitForDockerDaemon();
+  if (!ready) {
+    throw new Error("Docker daemon did not become ready in time.");
+  }
+  status.dockerDaemon = "ok";
+  status.dockerAction = "none";
+  setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
+  broadcastStatus();
 }
 
 function shouldBuildImages() {
@@ -392,6 +596,16 @@ async function startCompose(envPath: string, overridePath: string) {
       const message = error instanceof Error ? error.message : String(error);
       pushLog(`docker compose pull failed, continuing with local images: ${message}`);
     }
+  }
+
+  try {
+    await runComposeProcess(
+      ["compose", ...composeFiles, "rm", "-f", "-s", "minio-init"],
+      "正在清理可能残留的 minio-init 失败容器，以便重新执行初始化。"
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`docker compose rm minio-init skipped: ${message}`);
   }
 
   const upArgs = ["compose", ...composeFiles, "up", "-d"];
@@ -464,6 +678,7 @@ async function waitForHealth() {
 async function startStack() {
   if (isStarting) return;
   isStarting = true;
+  blockedHostPorts = new Set();
   status.logs = [];
   status.services.forEach((service) => {
     service.status = "pending";
@@ -485,6 +700,7 @@ async function startStack() {
 
       pushLog("Docker reported a host port allocation conflict. Re-probing ports and retrying once; if it fails again, click retry.");
       setService("Compose Stack", { status: "running", detail: "端口冲突，正在重新探测端口并重试一次。" });
+      blockedHostPorts = new Set([...blockedHostPorts, ...Object.values(runtimePorts)]);
       await selectRuntimePorts();
       ({ envPath, overridePath } = await writeRuntimeFiles());
       await startCompose(envPath, overridePath);
@@ -528,6 +744,12 @@ ipcMain.handle("desktop:get-status", () => status);
 ipcMain.handle("desktop:retry", async () => {
   await mainWindow?.loadFile(join(__dirname, "..", "renderer", "index.html"));
   void startStack();
+});
+ipcMain.handle("desktop:start-docker", async () => {
+  await startDockerDesktopFromUi();
+});
+ipcMain.handle("desktop:open-docker-download", async () => {
+  await openDockerInstallGuide();
 });
 ipcMain.handle("desktop:open-workbench", async () => {
   await mainWindow?.loadURL(getRuntimeUrls().webUrl);
