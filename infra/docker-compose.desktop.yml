@@ -1,6 +1,18 @@
 name: yunwu-desktop
 
 services:
+  postgres:
+    container_name: yunwu-desktop-postgres
+
+  redis:
+    container_name: yunwu-desktop-redis
+
+  minio:
+    container_name: yunwu-desktop-minio
+
+  minio-init:
+    container_name: yunwu-desktop-minio-init
+
   api:
     image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.4.0}
     container_name: yunwu-desktop-api
