@@ -4,6 +4,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 
 type Phase = "idle" | "checking" | "starting" | "waiting" | "ready" | "error";
@@ -27,13 +28,49 @@ type DesktopStatus = {
   logPath: string;
 };
 
-const webPort = 5173;
-const apiPort = 3000;
-const webUrl = `http://127.0.0.1:${webPort}`;
-const adminUrl = `${webUrl}/admin`;
-const healthUrl = `http://127.0.0.1:${apiPort}/health`;
-const readinessUrl = `http://127.0.0.1:${apiPort}/readiness`;
-const webHealthUrl = `${webUrl}/health`;
+function getPortEnv(name: string, fallback: number) {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
+}
+
+type RuntimePorts = {
+  web: number;
+  api: number;
+  postgres: number;
+  redis: number;
+  minio: number;
+  minioConsole: number;
+};
+
+type RuntimeUrls = {
+  webUrl: string;
+  adminUrl: string;
+  healthUrl: string;
+  readinessUrl: string;
+  webHealthUrl: string;
+};
+
+const preferredPorts = {
+  web: getPortEnv("YUNWU_DESKTOP_WEB_PORT", 5173),
+  api: getPortEnv("YUNWU_DESKTOP_API_PORT", 3000),
+  postgres: getPortEnv("YUNWU_DESKTOP_POSTGRES_PORT", 5432),
+  redis: getPortEnv("YUNWU_DESKTOP_REDIS_PORT", 6379),
+  minio: getPortEnv("YUNWU_DESKTOP_MINIO_PORT", 9000),
+  minioConsole: getPortEnv("YUNWU_DESKTOP_MINIO_CONSOLE_PORT", 9001)
+} satisfies RuntimePorts;
+
+let runtimePorts: RuntimePorts = { ...preferredPorts };
+
+function getRuntimeUrls(): RuntimeUrls {
+  const webUrl = `http://127.0.0.1:${runtimePorts.web}`;
+  return {
+    webUrl,
+    adminUrl: `${webUrl}/admin`,
+    healthUrl: `http://127.0.0.1:${runtimePorts.api}/health`,
+    readinessUrl: `http://127.0.0.1:${runtimePorts.api}/readiness`,
+    webHealthUrl: `${webUrl}/health`
+  };
+}
 
 let mainWindow: BrowserWindow | undefined;
 let currentProcess: ChildProcessWithoutNullStreams | undefined;
@@ -53,8 +90,8 @@ const status: DesktopStatus = {
     { name: "API /readiness", status: "pending" },
     { name: "Web /health", status: "pending" }
   ],
-  webUrl,
-  adminUrl,
+  webUrl: getRuntimeUrls().webUrl,
+  adminUrl: getRuntimeUrls().adminUrl,
   userDataPath: "",
   logPath: ""
 };
@@ -135,6 +172,74 @@ function getResourcePath(...parts: string[]) {
   return join(fallbackRoot, ...rest);
 }
 
+function checkPort(port: number) {
+  return new Promise<boolean>((resolvePromise) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", () => resolvePromise(false));
+    server.listen({ port, host: "0.0.0.0", exclusive: true }, () => {
+      server.close(() => resolvePromise(true));
+    });
+  });
+}
+
+async function getEphemeralPort(excludedPorts: Set<number>) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const port = await new Promise<number>((resolvePromise, reject) => {
+      const server = createServer();
+      server.unref();
+      server.on("error", reject);
+      server.listen({ port: 0, host: "0.0.0.0", exclusive: true }, () => {
+        const address = server.address();
+        server.close(() => {
+          if (address && typeof address === "object") {
+            resolvePromise(address.port);
+          } else {
+            reject(new Error("Failed to allocate an ephemeral port."));
+          }
+        });
+      });
+    });
+
+    if (!excludedPorts.has(port)) {
+      return port;
+    }
+  }
+
+  throw new Error("Failed to allocate a unique ephemeral port after 20 attempts.");
+}
+
+async function selectPort(name: string, preferredPort: number, selectedPorts: Set<number>) {
+  if (!selectedPorts.has(preferredPort) && (await checkPort(preferredPort))) {
+    selectedPorts.add(preferredPort);
+    pushLog(`${name} host port selected: ${preferredPort}.`);
+    return preferredPort;
+  }
+
+  const port = await getEphemeralPort(selectedPorts);
+  selectedPorts.add(port);
+  pushLog(`${name} preferred host port ${preferredPort} is unavailable; selected ${port}.`);
+  return port;
+}
+
+async function selectRuntimePorts() {
+  setPhase("checking", "正在探测本机可用端口。");
+  const selectedPorts = new Set<number>();
+  runtimePorts = {
+    web: await selectPort("Web", preferredPorts.web, selectedPorts),
+    api: await selectPort("API", preferredPorts.api, selectedPorts),
+    postgres: await selectPort("Postgres", preferredPorts.postgres, selectedPorts),
+    redis: await selectPort("Redis", preferredPorts.redis, selectedPorts),
+    minio: await selectPort("MinIO", preferredPorts.minio, selectedPorts),
+    minioConsole: await selectPort("MinIO Console", preferredPorts.minioConsole, selectedPorts)
+  };
+
+  const urls = getRuntimeUrls();
+  status.webUrl = urls.webUrl;
+  status.adminUrl = urls.adminUrl;
+  broadcastStatus();
+}
+
 async function writeRuntimeFiles() {
   const userData = app.getPath("userData");
   const runtimeDir = join(userData, "runtime");
@@ -148,14 +253,15 @@ async function writeRuntimeFiles() {
   const env = [
     "COMPOSE_PROJECT_NAME=yunwu-desktop",
     "NODE_ENV=production",
-    `PORT=${apiPort}`,
-    `WEB_PORT=${webPort}`,
+    `PORT=${runtimePorts.api}`,
+    `WEB_PORT=${runtimePorts.web}`,
     "POSTGRES_DB=yunwu_platform",
     "POSTGRES_USER=postgres",
     "POSTGRES_PASSWORD=postgres",
-    "REDIS_PORT=6379",
-    "MINIO_PORT=9000",
-    "MINIO_CONSOLE_PORT=9001",
+    `POSTGRES_PORT=${runtimePorts.postgres}`,
+    `REDIS_PORT=${runtimePorts.redis}`,
+    `MINIO_PORT=${runtimePorts.minio}`,
+    `MINIO_CONSOLE_PORT=${runtimePorts.minioConsole}`,
     "MINIO_ROOT_USER=minioadmin",
     "MINIO_ROOT_PASSWORD=minioadmin",
     "MINIO_BUCKET=yunwu-assets",
@@ -175,9 +281,9 @@ async function writeRuntimeFiles() {
     "AUTH_COOKIE_NAME=yunwu_session",
     "AUTH_SESSION_TTL_HOURS=168",
     "AUTH_COOKIE_SECURE=false",
-    `CORS_ORIGIN=http://127.0.0.1:${webPort},http://localhost:${webPort}`,
-    `WEB_ORIGIN=http://127.0.0.1:${webPort}`,
-    `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:9000/yunwu-assets`,
+    `CORS_ORIGIN=http://127.0.0.1:${runtimePorts.web},http://localhost:${runtimePorts.web}`,
+    `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
+    `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.minio}/yunwu-assets`,
     "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
     "YUNWU_IMAGE_TAG=v0.4.0",
     `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
@@ -233,18 +339,28 @@ function shouldBuildImages() {
   return !app.isPackaged || process.env.YUNWU_DESKTOP_BUILD === "1";
 }
 
+function isPortAllocatedMessage(message: string) {
+  return /port is already allocated|bind:|Ports are not available/i.test(message);
+}
+
 function runComposeProcess(args: string[], detail: string) {
   return new Promise<void>((resolvePromise, reject) => {
     pushLog(`Running docker ${args.join(" ")}`);
     setService("Compose Stack", { status: "running", detail });
     currentProcess = spawn("docker", args, { windowsHide: true });
+    let output = "";
 
-    currentProcess.stdout.on("data", (chunk) => pushLog(chunk.toString().trim()));
+    currentProcess.stdout.on("data", (chunk) => {
+      const line = chunk.toString().trim();
+      output += `${line}\n`;
+      pushLog(line);
+    });
     currentProcess.stderr.on("data", (chunk) => {
       const line = chunk.toString().trim();
+      output += `${line}\n`;
       pushLog(line);
-      if (/port is already allocated|bind:/.test(line)) {
-        setService("Compose Stack", { status: "error", detail: "端口冲突：请释放 3000/5173/5432/6379/9000/9001 后重试。" });
+      if (isPortAllocatedMessage(line)) {
+        setService("Compose Stack", { status: "error", detail: "端口冲突：将重新探测端口并重试；如仍失败，请点击重试。" });
       }
     });
     currentProcess.on("error", reject);
@@ -254,7 +370,7 @@ function runComposeProcess(args: string[], detail: string) {
         setService("Compose Stack", { status: "healthy", detail: "Compose 服务栈已启动" });
         resolvePromise();
       } else {
-        reject(new Error(`docker compose exited with ${code}.`));
+        reject(new Error(`docker compose exited with ${code}.\n${output}`));
       }
     });
   });
@@ -302,10 +418,11 @@ async function probe(url: string) {
 
 async function waitForHealth() {
   setPhase("waiting", "服务启动中，正在等待健康检查。");
+  const urls = getRuntimeUrls();
   const checks = [
-    { name: "API /health", url: healthUrl },
-    { name: "API /readiness", url: readinessUrl },
-    { name: "Web /health", url: webHealthUrl }
+    { name: "API /health", url: urls.healthUrl },
+    { name: "API /readiness", url: urls.readinessUrl },
+    { name: "Web /health", url: urls.webHealthUrl }
   ];
   const deadline = Date.now() + 180_000;
 
@@ -355,12 +472,26 @@ async function startStack() {
 
   try {
     await checkDocker();
-    const { envPath, overridePath } = await writeRuntimeFiles();
+    await selectRuntimePorts();
+    let { envPath, overridePath } = await writeRuntimeFiles();
     setPhase("starting", "正在启动 Docker Compose 服务栈。");
-    await startCompose(envPath, overridePath);
+    try {
+      await startCompose(envPath, overridePath);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!isPortAllocatedMessage(message)) {
+        throw error;
+      }
+
+      pushLog("Docker reported a host port allocation conflict. Re-probing ports and retrying once; if it fails again, click retry.");
+      setService("Compose Stack", { status: "running", detail: "端口冲突，正在重新探测端口并重试一次。" });
+      await selectRuntimePorts();
+      ({ envPath, overridePath } = await writeRuntimeFiles());
+      await startCompose(envPath, overridePath);
+    }
     await waitForHealth();
     setPhase("ready", "服务已就绪，正在打开工作台。");
-    await mainWindow?.loadURL(webUrl);
+    await mainWindow?.loadURL(getRuntimeUrls().webUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(message);
@@ -399,10 +530,10 @@ ipcMain.handle("desktop:retry", async () => {
   void startStack();
 });
 ipcMain.handle("desktop:open-workbench", async () => {
-  await mainWindow?.loadURL(webUrl);
+  await mainWindow?.loadURL(getRuntimeUrls().webUrl);
 });
 ipcMain.handle("desktop:open-admin", async () => {
-  await mainWindow?.loadURL(adminUrl);
+  await mainWindow?.loadURL(getRuntimeUrls().adminUrl);
 });
 ipcMain.handle("desktop:open-user-data", async () => {
   await shell.openPath(app.getPath("userData"));
