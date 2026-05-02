@@ -38,6 +38,17 @@
   "pnpm": {
     "overrides": {
       "typescript": "5.7.3"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@nestjs/core",
+      "@prisma/client",
+      "@prisma/engines",
+      "argon2",
+      "electron",
+      "electron-winstaller",
+      "esbuild",
+      "msgpackr-extract",
+      "prisma"
+    ]
   }
 }
