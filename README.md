@@ -1,8 +1,8 @@
 # Yunwu Custom API
 
-面向个人用户的 AI 图片生成与编辑工作台。`v0.4.1` 收口重点是桌面友好的发布方式：API、Worker、Web 发布为 GHCR Docker 镜像，Windows portable 包是 Electron 桌面窗体应用；桌面壳会依赖 Docker Desktop 运行本地服务栈，用户不需要在本机执行 `pnpm install`。
+面向个人用户的 AI 图片生成与编辑工作台。`v0.4.2` 收口重点是桌面友好的发布方式：API、Worker、Web 发布为 GHCR Docker 镜像，Windows portable 包是 Electron 桌面窗体应用；桌面壳会依赖 Docker Desktop 运行本地服务栈，用户不需要在本机执行 `pnpm install`。
 
-当前推荐版本：`v0.4.1`
+当前推荐版本：`v0.4.2`
 
 ## 当前能力
 
@@ -13,7 +13,7 @@
 - PostgreSQL、Redis、MinIO 本地依赖栈
 - 管理台 `/admin`：provider/model 配置、任务与健康状态、DEBUG 级运行日志辅助排障
 - Docker 镜像发布：`api`、`worker`、`web` 三个 target
-- Windows portable Electron 桌面壳：基于 Docker Desktop 拉取 v0.4.1 镜像运行本地服务栈
+- Windows portable Electron 桌面壳：基于 Docker Desktop 拉取 v0.4.2 镜像运行本地服务栈
 
 ## 仓库结构
 
@@ -21,8 +21,8 @@
 - `apps/web`：Vite + React 前台工作台与管理页
 - `packages/shared`：共享类型与常量
 - `infra`：PostgreSQL、Redis、MinIO、Docker Compose
-- `.github/workflows/release.yml`：v0.4.1 发布工程 workflow
-- `docs/release/v0.4.1.md`：release notes 草案
+- `.github/workflows/release.yml`：v0.4.2 发布工程 workflow
+- `docs/release/v0.4.2.md`：release notes 草案
 
 ## Windows Portable 使用
 
@@ -32,9 +32,9 @@
 - Docker Desktop 已安装并启动
 - 可访问 GHCR 镜像仓库
 
-Release artifact 中的 `Yunwu Desktop-0.4.1-win-x64-portable.zip` 是 Electron 桌面窗体应用。解压后运行桌面程序，桌面壳负责检查 Docker CLI/daemon，并使用内置 compose 文件拉起 API、Worker、Web、PostgreSQL、Redis、MinIO。
+Release artifact 中的 `Yunwu Desktop-0.4.2-win-x64-portable.zip` 是 Electron 桌面窗体应用。解压后运行桌面程序，桌面壳负责检查 Docker CLI/daemon，并使用内置 compose 文件拉起 API、Worker、Web、PostgreSQL、Redis、MinIO。
 
-如需不经过桌面壳、直接验证同一组 v0.4.1 镜像，可手动运行：
+如需不经过桌面壳、直接验证同一组 v0.4.2 镜像，可手动运行：
 
 ```powershell
 Copy-Item .env.example .env
@@ -56,10 +56,10 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.desktop.yml down
 ```
 
-默认镜像标签是 `v0.4.1`。如需覆盖：
+默认镜像标签是 `v0.4.2`。如需覆盖：
 
 ```env
-YUNWU_IMAGE_TAG=v0.4.1
+YUNWU_IMAGE_TAG=v0.4.2
 YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42
 ```
 
@@ -184,4 +184,4 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 
 - Docker 运维交接：[docs/infra/docker-ops-handoff.md](docs/infra/docker-ops-handoff.md)
 - Windows 本地启动与测试：[docs/qa/windows-local-startup.md](docs/qa/windows-local-startup.md)
-- v0.4.1 release notes 草案：[docs/release/v0.4.1.md](docs/release/v0.4.1.md)
+- v0.4.2 release notes 草案：[docs/release/v0.4.2.md](docs/release/v0.4.2.md)

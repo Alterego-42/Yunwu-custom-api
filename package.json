@@ -1,6 +1,6 @@
 {
   "name": "yunwu-custom-api",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "packageManager": "pnpm@10.17.1",
   "scripts": {
@@ -24,6 +24,7 @@
     "desktop:build": "pnpm --filter @yunwu/desktop build",
     "desktop:typecheck": "pnpm --filter @yunwu/desktop typecheck",
     "desktop:package": "pnpm --filter @yunwu/desktop package",
+    "desktop:verify-release": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/verify-release-line-endings.ps1",
     "docker:infra:up": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action infra:up",
     "docker:infra:down": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action infra:down",
     "docker:up": "powershell -ExecutionPolicy Bypass -File ./scripts/dev/compose-local.ps1 -Action up -Build",

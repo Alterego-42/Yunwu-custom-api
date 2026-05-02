@@ -417,7 +417,7 @@ async function writeRuntimeFiles() {
     `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
     `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.web}/api/assets`,
     "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
-    "YUNWU_IMAGE_TAG=v0.4.1",
+    "YUNWU_IMAGE_TAG=v0.4.2",
     `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
   ].join("\n");
 

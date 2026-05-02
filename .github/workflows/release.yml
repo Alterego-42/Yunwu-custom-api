@@ -9,7 +9,7 @@ on:
       version:
         description: "Release version/tag used for image and artifact names."
         required: true
-        default: "v0.4.1"
+        default: "v0.4.2"
       publish_release:
         description: "Upload artifacts to a GitHub Release for the version input."
         required: true

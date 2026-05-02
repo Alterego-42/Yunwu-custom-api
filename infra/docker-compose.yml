@@ -68,7 +68,12 @@ services:
       minio:
         condition: service_healthy
     restart: "no"
-    entrypoint: ["/bin/sh", "/scripts/init-minio.sh"]
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        tr -d '\r\357\273\277' < /scripts/init-minio.sh > /tmp/init-minio.sh
+        /bin/sh /tmp/init-minio.sh
     environment:
       MINIO_INTERNAL_ENDPOINT: ${MINIO_INTERNAL_ENDPOINT:-minio}
       MINIO_INTERNAL_PORT: 9000
