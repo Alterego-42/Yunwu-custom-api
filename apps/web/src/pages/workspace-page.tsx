@@ -24,6 +24,7 @@ import type {
   ModelRecord,
   TaskRecord,
   UiTask,
+  UiTaskAsset,
   UiTaskRoundNavigation,
 } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
@@ -35,6 +36,7 @@ type ComposerContext = {
   model?: string;
   capability?: CapabilityType;
   params?: Record<string, unknown>;
+  batchCount?: number;
   sourceTaskId?: string;
   sourceAction?: "edit" | "variant" | "fork";
   fork?: boolean;
@@ -61,6 +63,52 @@ function getPollingDelay(tasks: TaskRecord[]) {
 function confirmSessionAction(action: "archive" | "delete") {
   const label = action === "archive" ? "归档" : "删除";
   return window.confirm(`${label}后该会话会从当前工作台列表中移除，是否继续？`);
+}
+
+function clampBatchRetryCount(value: unknown) {
+  const nextValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : 0;
+
+  if (!Number.isFinite(nextValue)) {
+    return 0;
+  }
+
+  return Math.min(20, Math.max(0, Math.round(nextValue)));
+}
+
+function BatchRetryControl({
+  task,
+  onRetry,
+}: {
+  task: TaskRecord;
+  onRetry: (task: TaskRecord, batchRetryCount: number) => void;
+}) {
+  const [retryCount, setRetryCount] = useState(
+    task.batch?.failedCount ? 0 : 1,
+  );
+
+  return (
+    <label className="inline-flex items-center gap-2 rounded-md border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-2 py-1 text-xs text-muted-foreground">
+      <span className="shrink-0">重试并发数</span>
+      <input
+        aria-label="重试并发数"
+        type="number"
+        min={0}
+        max={20}
+        step={1}
+        className="h-7 w-[64px] rounded-md border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))] px-2 text-center tabular-nums text-foreground outline-none"
+        value={retryCount}
+        onChange={(event) => setRetryCount(clampBatchRetryCount(event.target.value))}
+      />
+      <Button size="sm" variant="outline" onClick={() => onRetry(task, retryCount)}>
+        重试
+      </Button>
+    </label>
+  );
 }
 
 export function WorkspacePage() {
@@ -368,6 +416,7 @@ export function WorkspacePage() {
             ? "image.edit"
             : task.capability,
         params: task.params,
+        batchCount: 1,
         sourceTaskId: task.id,
         sourceAction: fork ? "fork" : mode,
         fork,
@@ -392,6 +441,42 @@ export function WorkspacePage() {
       setFallbackActiveId(conversationId);
     },
     [navigate, routeConversationId],
+  );
+
+  const handleEditBatchAsset = useCallback(
+    (task: UiTask, asset: UiTaskAsset) => {
+      const sourceTask = taskRecordById.get(task.id);
+      if (!sourceTask) {
+        return;
+      }
+
+      const slot = task.batchSlots?.find((item) => item.asset?.id === asset.id);
+      setSelectedAssets([
+        {
+          id: asset.id,
+          taskId: task.id,
+          type: asset.type,
+          url: asset.url ?? "",
+          storageKey: asset.storageKey,
+          mimeType: asset.mimeType,
+          width: asset.width,
+          height: asset.height,
+          createdAt: asset.createdAt,
+        },
+      ]);
+      setComposerContext({
+        prompt: sourceTask.prompt,
+        model: sourceTask.modelId,
+        capability: "image.edit",
+        params: sourceTask.params,
+        batchCount: 1,
+        sourceTaskId: sourceTask.id,
+        sourceAction: "edit",
+        submitLabel: "继续创作",
+        hint: `已选择批量结果${slot ? ` #${slot.batchIndex + 1}` : ""} · ${summarizeParams(sourceTask.params)}`,
+      });
+    },
+    [taskRecordById],
   );
 
   const removeSessionFromList = useCallback(
@@ -504,6 +589,7 @@ export function WorkspacePage() {
       capability: CapabilityType;
       assetIds?: string[];
       params?: Record<string, unknown>;
+      batchCount?: number;
     }) => {
       if (!activeId && !composerContext?.fork) {
         throw new Error("请先选择会话。");
@@ -517,6 +603,7 @@ export function WorkspacePage() {
         prompt: input.prompt,
         assetIds: input.assetIds,
         params: input.params,
+        batchCount: input.batchCount,
         sourceTaskId: composerContext?.sourceTaskId,
         sourceAction: composerContext?.sourceAction,
         fork: composerContext?.fork,
@@ -545,9 +632,12 @@ export function WorkspacePage() {
   );
 
   const handleRetryTask = useCallback(
-    async (task: TaskRecord) => {
+    async (task: TaskRecord, batchRetryCount?: number) => {
       setDetailError(null);
-      const retryTask = await apiClient.retryTask(task.id);
+      const retryTask =
+        batchRetryCount === undefined
+          ? await apiClient.retryTask(task.id)
+          : await apiClient.retryTask(task.id, { batchRetryCount });
       const conversationId = retryTask.conversationId ?? task.conversationId;
       setFocusedTaskId(retryTask.id);
 
@@ -569,35 +659,58 @@ export function WorkspacePage() {
       }
 
       const actions: ReactNode[] = [];
+      const isBatch = Boolean(task.batch?.isBatch);
 
       if (task.status === "succeeded") {
         actions.push(
-          <Button key={`${task.id}-retry`} size="sm" variant="outline" onClick={() => void handleRetryTask(task)}>
-            重试
-          </Button>,
+          isBatch ? (
+            <BatchRetryControl
+              key={`${task.id}-batch-retry`}
+              task={task}
+              onRetry={(nextTask, batchRetryCount) =>
+                void handleRetryTask(nextTask, batchRetryCount)
+              }
+            />
+          ) : (
+            <Button key={`${task.id}-retry`} size="sm" variant="outline" onClick={() => void handleRetryTask(task)}>
+              重试
+            </Button>
+          ),
         );
-        actions.push(
-          <Button key={`${task.id}-edit`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "edit")}>
-            再编辑
-          </Button>,
-        );
-        actions.push(
-          <Button key={`${task.id}-variant`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "variant")}>
-            生成变体
-          </Button>,
-        );
-        actions.push(
-          <Button key={`${task.id}-fork`} size="sm" onClick={() => primeComposerFromTask(task, "variant", true)}>
-            Fork 新会话
-          </Button>,
-        );
+        if (!isBatch) {
+          actions.push(
+            <Button key={`${task.id}-edit`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "edit")}>
+              再编辑
+            </Button>,
+          );
+          actions.push(
+            <Button key={`${task.id}-variant`} size="sm" variant="outline" onClick={() => primeComposerFromTask(task, "variant")}>
+              生成变体
+            </Button>,
+          );
+          actions.push(
+            <Button key={`${task.id}-fork`} size="sm" onClick={() => primeComposerFromTask(task, "variant", true)}>
+              Fork 新会话
+            </Button>,
+          );
+        }
       }
 
       if (task.status === "failed" && task.canRetry) {
         actions.push(
-          <Button key={`${task.id}-retry`} size="sm" onClick={() => void handleRetryTask(task)}>
-            一键重试
-          </Button>,
+          isBatch ? (
+            <BatchRetryControl
+              key={`${task.id}-batch-retry`}
+              task={task}
+              onRetry={(nextTask, batchRetryCount) =>
+                void handleRetryTask(nextTask, batchRetryCount)
+              }
+            />
+          ) : (
+            <Button key={`${task.id}-retry`} size="sm" onClick={() => void handleRetryTask(task)}>
+              一键重试
+            </Button>
+          ),
         );
       }
 
@@ -663,6 +776,7 @@ export function WorkspacePage() {
           onRemoveUpload={handleRemoveUpload}
           onSubmitTask={handleSubmitTask}
           renderTaskActions={renderTaskActions}
+          onEditTaskAsset={handleEditBatchAsset}
           taskRoundNavigationById={taskRoundNavigationById}
           focusedTaskId={focusedTaskId}
         />
@@ -671,6 +785,7 @@ export function WorkspacePage() {
             tasks={uiTasks}
             queueLength={queueLength}
             renderTaskActions={renderTaskActions}
+            onEditTaskAsset={handleEditBatchAsset}
             taskRoundNavigationById={taskRoundNavigationById}
             focusedTaskId={focusedTaskId}
           />

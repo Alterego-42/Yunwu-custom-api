@@ -12,6 +12,7 @@ import {
   type Message,
   type ModelCapability,
   type Task,
+  type TaskBatchItem,
   type TaskEvent,
   type User,
 } from "@prisma/client";
@@ -50,6 +51,8 @@ import type {
   ProviderWarning,
   ProviderTestGenerateResponse,
   RetryTaskResponse,
+  TaskBatchItemRecord,
+  TaskBatchSummary,
   TaskEventRecord,
   TaskEventsResponse,
   TaskFailureRecord,
@@ -86,6 +89,7 @@ import { TaskQueueService } from "../tasks/task-queue.service";
 import { ConversationEventsService } from "./conversation-events.service";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateTaskDto } from "./dto/create-task.dto";
+import { RetryTaskDto } from "./dto/retry-task.dto";
 import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
 import { CheckUserApiKeyDto } from "./dto/check-user-api-key.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
@@ -110,6 +114,7 @@ interface TaskInputShape {
   assetIds?: string[];
   params?: Record<string, unknown>;
   providerBaseUrl?: string;
+  batchCount?: number;
 }
 
 interface ResolvedUserSettings {
@@ -123,6 +128,7 @@ type TaskRecordEntity = Task & {
   conversation?: Conversation | null;
   user?: User | null;
   events?: TaskEvent[];
+  batchItems?: TaskBatchItem[];
 };
 
 @Injectable()
@@ -397,6 +403,7 @@ export class ApiService implements OnModuleInit {
         `Model ${input.model} does not support ${capability}.`,
       );
     }
+    const batchCount = this.normalizeBatchCount(input.batchCount);
 
     if (input.sourceAction && !input.sourceTaskId) {
       throw new BadRequestException(
@@ -411,7 +418,12 @@ export class ApiService implements OnModuleInit {
             user.role === "admin"
               ? { id: input.sourceTaskId }
               : { id: input.sourceTaskId, userId: user.id },
-          include: { conversation: true, assets: true, events: true },
+          include: {
+            conversation: true,
+            assets: true,
+            events: true,
+            batchItems: { orderBy: { batchIndex: "asc" } },
+          },
         })
       : null;
     if (input.sourceTaskId && !sourceTask) {
@@ -435,10 +447,28 @@ export class ApiService implements OnModuleInit {
       shouldFork
         ? "fork"
         : this.asSupportedSourceAction(input.sourceAction);
+    if (shouldFork && this.isBatchTaskEntity(sourceTask)) {
+      throw new BadRequestException("Batch tasks cannot be forked.");
+    }
+    if (
+      this.isBatchTaskEntity(sourceTask) &&
+      (normalizedSourceAction === "edit" ||
+        normalizedSourceAction === "variant") &&
+      !(input.assetIds?.length)
+    ) {
+      throw new BadRequestException(
+        "Choose one successful batch image before re-editing a batch task.",
+      );
+    }
     const requestedAssetIds = this.normalizeAssetIds(
       input.assetIds?.length
         ? input.assetIds
         : this.defaultSourceAssetIds(sourceTask, normalizedSourceAction),
+    );
+    this.assertValidBatchSourceAssetSelection(
+      sourceTask,
+      normalizedSourceAction,
+      requestedAssetIds,
     );
     const inputAssets = await this.loadInputAssets(user.id, requestedAssetIds);
     if (inputAssets.length !== requestedAssetIds.length) {
@@ -463,6 +493,7 @@ export class ApiService implements OnModuleInit {
             assetIds: requestedAssetIds,
             sourceTaskId: sourceTask?.id,
             sourceAction: normalizedSourceAction,
+            ...(batchCount > 1 ? { batchCount } : {}),
           },
         },
       });
@@ -482,19 +513,32 @@ export class ApiService implements OnModuleInit {
             assetIds: requestedAssetIds,
             providerBaseUrl: userSettings.baseUrl,
             params: this.toJsonRecord(input.params),
+            ...(batchCount > 1 ? { batchCount } : {}),
           } satisfies Prisma.InputJsonObject,
         },
       });
+      if (batchCount > 1) {
+        await tx.taskBatchItem.createMany({
+          data: Array.from({ length: batchCount }, (_, index) => ({
+            taskId: task.id,
+            batchIndex: index,
+            status: "queued" as const,
+            progress: 0,
+          })),
+        });
+      }
       await tx.taskEvent.create({
         data: {
           taskId: task.id,
-          eventType: "queued",
+          eventType: batchCount > 1 ? "batch.queued" : "queued",
           status: "queued",
-          summary: "Task queued.",
+          summary: batchCount > 1 ? "Batch task queued." : "Task queued.",
           details: {
             title: "Task queued",
             detail:
-              "Your image task has been queued and will start as soon as a worker is available.",
+              batchCount > 1
+                ? `Your batch image task with ${batchCount} slot(s) has been queued.`
+                : "Your image task has been queued and will start as soon as a worker is available.",
             progress: 0,
             ...this.buildInputSummary({
               model: input.model,
@@ -502,6 +546,7 @@ export class ApiService implements OnModuleInit {
               assetIds: requestedAssetIds,
               providerBaseUrl: userSettings.baseUrl,
               params: this.toJsonRecord(input.params),
+              batchCount,
             }),
             ...(sourceTask?.id ? { sourceTaskId: sourceTask.id } : {}),
             ...(normalizedSourceAction
@@ -533,6 +578,7 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
     });
     const conversationDetail = await this.getConversationDetail(
@@ -540,7 +586,11 @@ export class ApiService implements OnModuleInit {
       conversation.id,
     );
 
-    await this.taskQueue.enqueueTask(task.id);
+    if (batchCount > 1) {
+      await this.taskQueue.enqueueBatchTask(task.id);
+    } else {
+      await this.taskQueue.enqueueTask(task.id);
+    }
     this.conversationEvents.publishTaskUpdated({
       conversationId: conversation.id,
       taskId: task.id,
@@ -598,6 +648,7 @@ export class ApiService implements OnModuleInit {
             conversation: true,
             user: true,
             events: this.latestFailedEventArgs(),
+            batchItems: { orderBy: { batchIndex: "asc" } },
           },
           take: 8,
         }),
@@ -610,6 +661,7 @@ export class ApiService implements OnModuleInit {
                 conversation: true,
                 user: true,
                 events: this.latestFailedEventArgs(),
+                batchItems: { orderBy: { batchIndex: "asc" } },
               },
             },
           },
@@ -624,6 +676,7 @@ export class ApiService implements OnModuleInit {
             conversation: true,
             user: true,
             events: this.latestFailedEventArgs(),
+            batchItems: { orderBy: { batchIndex: "asc" } },
           },
           take: 8,
         }),
@@ -634,9 +687,7 @@ export class ApiService implements OnModuleInit {
         this.toConversationSummary(conversation),
       ),
       recentTasks: recentTasks.map((task) => this.toTaskRecord(task, task.assets)),
-      recentAssets: recentAssets
-        .map((asset) => this.toLibraryItemRecord(asset))
-        .filter((item): item is LibraryItemRecord => Boolean(item)),
+      recentAssets: this.toLibraryItemRecords(recentAssets),
       recoveryTasks: recoveryTasks
         .map((task) => this.toTaskRecord(task, task.assets))
         .filter((task) => Boolean(task.failure)),
@@ -652,6 +703,7 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
       take: 50,
     });
@@ -692,6 +744,7 @@ export class ApiService implements OnModuleInit {
             conversation: true,
             user: true,
             events: this.latestFailedEventArgs(),
+            batchItems: { orderBy: { batchIndex: "asc" } },
           },
         },
       },
@@ -700,9 +753,7 @@ export class ApiService implements OnModuleInit {
     });
 
     return {
-      items: assets
-        .map((asset) => this.toLibraryItemRecord(asset))
-        .filter((item): item is LibraryItemRecord => Boolean(item)),
+      items: this.toLibraryItemRecords(assets),
     };
   }
 
@@ -742,6 +793,7 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
     });
     if (!task) {
@@ -760,6 +812,7 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
       take: 50,
     });
@@ -785,6 +838,7 @@ export class ApiService implements OnModuleInit {
   async retryTask(
     user: AuthenticatedUser,
     id: string,
+    input: RetryTaskDto = {},
   ): Promise<RetryTaskResponse> {
     const task = await this.prisma.task.findFirst({
       where: user.role === "admin" ? { id } : { id, userId: user.id },
@@ -793,6 +847,7 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
     });
     if (!task) {
@@ -807,6 +862,9 @@ export class ApiService implements OnModuleInit {
       throw new BadRequestException(
         this.getTaskRetryBlockedMessage(task.status),
       );
+    }
+    if (this.isBatchTaskEntity(task)) {
+      return this.retryBatchTask(task, input);
     }
 
     const previousError = this.sanitizeDisplayText(
@@ -892,6 +950,215 @@ export class ApiService implements OnModuleInit {
         conversation: true,
         user: true,
         events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
+      },
+    });
+
+    return {
+      task: this.toTaskRecord(hydrated, hydrated.assets),
+      retriedFromTaskId: task.id,
+    };
+  }
+
+  private async retryBatchTask(
+    task: TaskRecordEntity & {
+      assets: Asset[];
+      conversation?: Conversation | null;
+      user?: User | null;
+      batchItems: TaskBatchItem[];
+    },
+    input: RetryTaskDto,
+  ): Promise<RetryTaskResponse> {
+    const batchRetryCount =
+      input.batchRetryCount === undefined
+        ? 1
+        : this.normalizeBatchRetryCount(input.batchRetryCount);
+    const previousBatch = this.toTaskBatchSummary(
+      task,
+      this.asRecord(task.output),
+    );
+    const previousError = this.sanitizeDisplayText(
+      task.errorMessage ?? previousBatch?.firstFailureMessage ?? "",
+      240,
+    );
+
+    if (batchRetryCount === 0) {
+      const failedItems = task.batchItems.filter(
+        (item) => item.status === "failed",
+      );
+      if (failedItems.length === 0) {
+        throw new BadRequestException("This batch has no failed slots to retry.");
+      }
+
+      await this.prisma.$transaction(async (tx) => {
+        await tx.taskBatchItem.updateMany({
+          where: {
+            taskId: task.id,
+            id: { in: failedItems.map((item) => item.id) },
+          },
+          data: {
+            status: "queued",
+            progress: 0,
+            assetId: null,
+            errorMessage: null,
+            providerSummary: Prisma.JsonNull,
+            output: Prisma.JsonNull,
+            startedAt: null,
+            completedAt: null,
+          },
+        });
+        const items = await tx.taskBatchItem.findMany({
+          where: { taskId: task.id },
+          orderBy: { batchIndex: "asc" },
+        });
+        const summary = this.buildPersistedBatchSummary(items);
+        await tx.task.update({
+          where: { id: task.id },
+          data: {
+            status: "queued",
+            progress: this.progressForBatchSummary(summary),
+            errorMessage: null,
+            output: {
+              ...this.asRecord(task.output),
+              ...summary,
+            } as Prisma.InputJsonObject,
+          },
+        });
+        await tx.taskEvent.create({
+          data: {
+            taskId: task.id,
+            eventType: "batch.retry_failed_slots_requested",
+            status: "queued",
+            summary: "Batch failed slots retry requested.",
+            details: {
+              title: "Retry failed slots",
+              detail: `Retrying ${failedItems.length} failed batch slot(s) in place.`,
+              retryMode: "in_place_failed_slots",
+              retriedSlotCount: failedItems.length,
+              progress: this.progressForBatchSummary(summary),
+              ...(previousError ? { errorMessage: previousError } : {}),
+            } as Prisma.InputJsonObject,
+          },
+        });
+      });
+
+      await this.taskQueue.enqueueBatchTask(
+        task.id,
+        "batch-retry-failed-slots",
+        { dedupe: false },
+      );
+      this.conversationEvents.publishTaskUpdated({
+        conversationId: task.conversationId ?? "",
+        taskId: task.id,
+        status: "queued",
+      });
+
+      const hydrated = await this.prisma.task.findUniqueOrThrow({
+        where: { id: task.id },
+        include: {
+          assets: true,
+          conversation: true,
+          user: true,
+          events: this.latestFailedEventArgs(),
+          batchItems: { orderBy: { batchIndex: "asc" } },
+        },
+      });
+
+      return {
+        task: this.toTaskRecord(hydrated, hydrated.assets),
+        retriedFromTaskId: task.id,
+      };
+    }
+
+    const retryInput = {
+      ...this.asRecord(task.input),
+      batchCount: batchRetryCount,
+    } as Prisma.InputJsonObject;
+    const retryTask = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.task.create({
+        data: {
+          userId: task.userId,
+          conversationId: task.conversationId,
+          sourceTaskId: task.id,
+          sourceAction: "retry",
+          type: task.type,
+          status: "queued",
+          progress: 0,
+          input: retryInput,
+        },
+      });
+      await tx.taskBatchItem.createMany({
+        data: Array.from({ length: batchRetryCount }, (_, index) => ({
+          taskId: created.id,
+          batchIndex: index,
+          status: "queued" as const,
+          progress: 0,
+        })),
+      });
+      await tx.taskEvent.createMany({
+        data: [
+          {
+            taskId: task.id,
+            eventType: "retry_requested",
+            status: task.status,
+            summary: "Batch retry requested.",
+            details: {
+              title: "Retry requested",
+              detail:
+                "A batch retry was requested and a new batch task was queued.",
+              retryTaskId: created.id,
+              previousStatus: task.status,
+              batchRetryCount,
+              ...(previousError ? { errorMessage: previousError } : {}),
+            },
+          },
+          {
+            taskId: created.id,
+            eventType: "retried",
+            status: "queued",
+            summary: "Batch retry task created.",
+            details: {
+              title: "Retry task created",
+              detail: "This batch task was created from a previous batch task.",
+              retryOfTaskId: task.id,
+              batchRetryCount,
+              ...(previousError ? { errorMessage: previousError } : {}),
+            },
+          },
+          {
+            taskId: created.id,
+            eventType: "batch.queued",
+            status: "queued",
+            summary: "Batch retry task queued.",
+            details: {
+              title: "Task queued",
+              detail: `The retry batch with ${batchRetryCount} slot(s) has been queued.`,
+              progress: 0,
+              retryOfTaskId: task.id,
+              ...this.buildInputSummary(retryInput as TaskInputShape),
+            } as Prisma.InputJsonObject,
+          },
+        ],
+      });
+
+      return created;
+    });
+
+    await this.taskQueue.enqueueBatchTask(retryTask.id, "batch-retry");
+    this.conversationEvents.publishTaskUpdated({
+      conversationId: task.conversationId ?? "",
+      taskId: retryTask.id,
+      status: retryTask.status,
+    });
+
+    const hydrated = await this.prisma.task.findUniqueOrThrow({
+      where: { id: retryTask.id },
+      include: {
+        assets: true,
+        conversation: true,
+        user: true,
+        events: this.latestFailedEventArgs(),
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
     });
 
@@ -905,7 +1172,7 @@ export class ApiService implements OnModuleInit {
     user: AuthenticatedUser,
     id: string,
   ): Promise<RetryTaskResponse> {
-    return this.retryTask(user, id);
+    return this.retryTask(user, id, {});
   }
 
   async getAdminModelCapabilities(): Promise<AdminModelCapabilitiesResponse> {
@@ -1683,6 +1950,7 @@ export class ApiService implements OnModuleInit {
           include: {
             assets: true,
             events: this.latestFailedEventArgs(),
+            batchItems: { orderBy: { batchIndex: "asc" } },
           },
           orderBy: { createdAt: "asc" },
         },
@@ -1781,6 +2049,7 @@ export class ApiService implements OnModuleInit {
   ): TaskRecord {
     const input = this.asRecord(task.input) as TaskInputShape;
     const output = this.asRecord(task.output);
+    const batch = this.toTaskBatchSummary(task, output);
     const inputAssetIds = this.asStringArray(input.assetIds) ?? [];
     const outputAssetIds = Array.isArray(output.assetIds)
       ? output.assetIds.filter((id): id is string => typeof id === "string")
@@ -1807,12 +2076,143 @@ export class ApiService implements OnModuleInit {
       userEmail: task.user?.email ?? undefined,
       userDisplayName: task.user?.displayName ?? undefined,
       inputSummary: this.buildInputSummary(input),
-      outputSummary: this.buildOutputSummary(output, assets),
+      outputSummary: this.buildOutputSummary(output, assets, batch),
+      batch,
+      batchItems: batch
+        ? (task.batchItems ?? []).map((item) =>
+            this.toTaskBatchItemRecord(item),
+          )
+        : undefined,
       createdAt: task.createdAt.toISOString(),
       updatedAt: task.updatedAt.toISOString(),
       errorMessage: task.errorMessage ?? undefined,
       assetIds: inputAssetIds.length > 0 ? inputAssetIds : outputAssetIds,
     };
+  }
+
+  private toTaskBatchSummary(
+    task: TaskRecordEntity,
+    output: Record<string, unknown>,
+  ): TaskBatchSummary | undefined {
+    const input = this.asRecord(task.input) as TaskInputShape;
+    const items = task.batchItems ?? [];
+    const outputBatchSize = this.asNumber(output.batchSize);
+    const batchSize =
+      items.length ||
+      (typeof input.batchCount === "number" ? input.batchCount : undefined) ||
+      outputBatchSize ||
+      1;
+
+    if (items.length === 0 && batchSize <= 1) {
+      return undefined;
+    }
+
+    if (items.length > 0) {
+      const successCount = items.filter((item) => item.status === "succeeded").length;
+      const failedItems = items.filter((item) => item.status === "failed");
+      const failedCount = failedItems.length;
+      const returnedCount = successCount + failedCount;
+      const firstFailureMessage = failedItems
+        .slice()
+        .sort((left, right) => left.batchIndex - right.batchIndex)
+        .find((item) => item.errorMessage)?.errorMessage;
+
+      return {
+        isBatch: true,
+        batchSize,
+        returnedCount,
+        successCount,
+        failedCount,
+        loadingCount: Math.max(0, batchSize - returnedCount),
+        ...(firstFailureMessage ? { firstFailureMessage } : {}),
+        partialSuccess: successCount > 0 && failedCount > 0,
+      };
+    }
+
+    const successCount = this.asNumber(output.successCount) ?? 0;
+    const failedCount = this.asNumber(output.failedCount) ?? 0;
+    const returnedCount =
+      this.asNumber(output.returnedCount) ?? successCount + failedCount;
+    const firstFailureMessage = this.asOptionalString(
+      output.firstFailureMessage,
+    );
+
+    return {
+      isBatch: true,
+      batchSize,
+      returnedCount,
+      successCount,
+      failedCount,
+      loadingCount:
+        this.asNumber(output.loadingCount) ??
+        Math.max(0, batchSize - returnedCount),
+      ...(firstFailureMessage ? { firstFailureMessage } : {}),
+      partialSuccess:
+        typeof output.partialSuccess === "boolean"
+          ? output.partialSuccess
+          : successCount > 0 && failedCount > 0,
+    };
+  }
+
+  private toTaskBatchItemRecord(
+    item: TaskBatchItem,
+  ): TaskBatchItemRecord {
+    return {
+      id: item.id,
+      taskId: item.taskId,
+      batchIndex: item.batchIndex,
+      status: item.status,
+      progress: item.progress,
+      assetId: item.assetId ?? undefined,
+      errorMessage: item.errorMessage ?? undefined,
+      attempt: item.attempt,
+      startedAt: item.startedAt?.toISOString(),
+      completedAt: item.completedAt?.toISOString(),
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+    };
+  }
+
+  private buildPersistedBatchSummary(items: TaskBatchItem[]) {
+    const orderedItems = items
+      .slice()
+      .sort((left, right) => left.batchIndex - right.batchIndex);
+    const successItems = orderedItems.filter(
+      (item) => item.status === "succeeded",
+    );
+    const failedItems = orderedItems.filter((item) => item.status === "failed");
+    const returnedCount = successItems.length + failedItems.length;
+    const firstFailureMessage = failedItems.find(
+      (item) => item.errorMessage,
+    )?.errorMessage;
+
+    return {
+      batchSize: orderedItems.length,
+      returnedCount,
+      successCount: successItems.length,
+      failedCount: failedItems.length,
+      loadingCount: Math.max(0, orderedItems.length - returnedCount),
+      assetIds: successItems
+        .map((item) => item.assetId)
+        .filter((assetId): assetId is string => Boolean(assetId)),
+      ...(firstFailureMessage ? { firstFailureMessage } : {}),
+      partialSuccess: successItems.length > 0 && failedItems.length > 0,
+    };
+  }
+
+  private progressForBatchSummary(summary: {
+    batchSize: number;
+    returnedCount: number;
+  }) {
+    if (summary.batchSize <= 0) {
+      return 0;
+    }
+
+    if (summary.returnedCount >= summary.batchSize) {
+      return 100;
+    }
+
+    return 20 + Math.round((summary.returnedCount / summary.batchSize) * 75);
   }
 
   private toTaskEventRecord(event: TaskEvent): TaskEventRecord {
@@ -1961,8 +2361,32 @@ export class ApiService implements OnModuleInit {
       mimeType: asset.mimeType ?? undefined,
       width: typeof metadata.width === "number" ? metadata.width : undefined,
       height: typeof metadata.height === "number" ? metadata.height : undefined,
+      batchIndex:
+        typeof metadata.batchIndex === "number" ? metadata.batchIndex : undefined,
+      batchItemId:
+        typeof metadata.batchItemId === "string" ? metadata.batchItemId : undefined,
       createdAt: asset.createdAt.toISOString(),
     };
+  }
+
+  private sortAssetsByBatchIndex<T extends Asset>(assets: T[]): T[] {
+    return assets.slice().sort((left, right) => {
+      const leftIndex = this.getAssetBatchIndex(left);
+      const rightIndex = this.getAssetBatchIndex(right);
+
+      if (leftIndex !== rightIndex) {
+        return leftIndex - rightIndex;
+      }
+
+      return left.createdAt.getTime() - right.createdAt.getTime();
+    });
+  }
+
+  private getAssetBatchIndex(asset: Asset) {
+    const metadata = this.asRecord(asset.metadata);
+    return typeof metadata.batchIndex === "number"
+      ? metadata.batchIndex
+      : Number.MAX_SAFE_INTEGER;
   }
 
   private toLibraryItemRecord(
@@ -1980,12 +2404,70 @@ export class ApiService implements OnModuleInit {
     }
 
     return {
+      kind: "single",
       asset: this.toAssetRecord(asset),
       task: this.toTaskRecord(asset.task, asset.task.assets ?? []),
       conversation: asset.task.conversation
         ? this.toConversationSummary(asset.task.conversation)
         : undefined,
     };
+  }
+
+  private toLibraryItemRecords(
+    assets: Array<
+      Asset & {
+        task?:
+          | (TaskRecordEntity & {
+              assets: Asset[];
+              conversation?: Conversation | null;
+            })
+          | null;
+      }
+    >,
+  ): LibraryItemRecord[] {
+    const items: LibraryItemRecord[] = [];
+    const seenBatchTaskIds = new Set<string>();
+
+    for (const asset of assets) {
+      if (!asset.task) {
+        continue;
+      }
+
+      if (!this.isBatchTaskEntity(asset.task)) {
+        const item = this.toLibraryItemRecord(asset);
+        if (item) {
+          items.push(item);
+        }
+        continue;
+      }
+
+      if (seenBatchTaskIds.has(asset.task.id)) {
+        continue;
+      }
+
+      seenBatchTaskIds.add(asset.task.id);
+      const successfulAssets = this.sortAssetsByBatchIndex(
+        (asset.task.assets ?? []).filter(
+          (taskAsset) =>
+            taskAsset.type === "generated" && taskAsset.status !== "deleted",
+        ),
+      );
+      const representative = successfulAssets[0] ?? asset;
+
+      items.push({
+        kind: "batch",
+        asset: this.toAssetRecord(representative),
+        assets: successfulAssets.map((taskAsset) =>
+          this.toAssetRecord(taskAsset),
+        ),
+        task: this.toTaskRecord(asset.task, asset.task.assets ?? []),
+        conversation: asset.task.conversation
+          ? this.toConversationSummary(asset.task.conversation)
+          : undefined,
+      });
+    }
+
+    return items;
   }
 
   private toAdminModelCapabilityRecord(
@@ -2022,21 +2504,29 @@ export class ApiService implements OnModuleInit {
       assetIds: input.assetIds ?? [],
       providerBaseUrl: input.providerBaseUrl,
       params: this.summarizeParams(input.params),
+      ...(input.batchCount && input.batchCount > 1
+        ? { batchCount: input.batchCount }
+        : {}),
     };
   }
 
   private buildOutputSummary(
     output: Record<string, unknown>,
     assets: Asset[],
+    batch?: TaskBatchSummary,
   ): Record<string, unknown> | undefined {
-    const generatedAssets = assets.filter(
-      (asset) => asset.type === "generated",
+    const generatedAssets = this.sortAssetsByBatchIndex(
+      assets.filter((asset) => asset.type === "generated"),
     );
     const outputAssetIds = Array.isArray(output.assetIds)
       ? output.assetIds.filter((id): id is string => typeof id === "string")
       : [];
 
-    if (generatedAssets.length === 0 && outputAssetIds.length === 0) {
+    if (
+      generatedAssets.length === 0 &&
+      outputAssetIds.length === 0 &&
+      !batch?.isBatch
+    ) {
       return undefined;
     }
 
@@ -2047,6 +2537,17 @@ export class ApiService implements OnModuleInit {
           ? generatedAssets.map((asset) => asset.id)
           : outputAssetIds,
       mocked: typeof output.mocked === "boolean" ? output.mocked : undefined,
+      ...(batch?.isBatch
+        ? {
+            batchSize: batch.batchSize,
+            returnedCount: batch.returnedCount,
+            successCount: batch.successCount,
+            failedCount: batch.failedCount,
+            loadingCount: batch.loadingCount,
+            firstFailureMessage: batch.firstFailureMessage,
+            partialSuccess: batch.partialSuccess,
+          }
+        : {}),
       inputAssetIds: Array.isArray(output.inputAssetIds)
         ? output.inputAssetIds.filter(
             (id): id is string => typeof id === "string",
@@ -2064,6 +2565,14 @@ export class ApiService implements OnModuleInit {
             typeof metadata.width === "number" ? metadata.width : undefined,
           height:
             typeof metadata.height === "number" ? metadata.height : undefined,
+          batchIndex:
+            typeof metadata.batchIndex === "number"
+              ? metadata.batchIndex
+              : undefined,
+          batchItemId:
+            typeof metadata.batchItemId === "string"
+              ? metadata.batchItemId
+              : undefined,
         };
       }),
     };
@@ -2075,6 +2584,37 @@ export class ApiService implements OnModuleInit {
       orderBy: { createdAt: "desc" as const },
       take: 1,
     };
+  }
+
+  private normalizeBatchCount(value: unknown) {
+    if (value === undefined || value === null) {
+      return 1;
+    }
+
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 20) {
+      throw new BadRequestException("batchCount must be an integer from 1 to 20.");
+    }
+
+    return value;
+  }
+
+  private normalizeBatchRetryCount(value: unknown) {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 20) {
+      throw new BadRequestException(
+        "batchRetryCount must be an integer from 0 to 20.",
+      );
+    }
+
+    return value;
+  }
+
+  private isBatchTaskEntity(task?: TaskRecordEntity | null) {
+    if (!task) {
+      return false;
+    }
+
+    const input = this.asRecord(task.input) as TaskInputShape;
+    return (input.batchCount ?? 1) > 1 || (task.batchItems?.length ?? 0) > 0;
   }
 
   private normalizeAssetIds(assetIds?: string[]) {
@@ -2117,6 +2657,38 @@ export class ApiService implements OnModuleInit {
     return sourceTask.assets
       ?.filter((asset) => asset.type === "generated")
       .map((asset) => asset.id) ?? [];
+  }
+
+  private assertValidBatchSourceAssetSelection(
+    sourceTask:
+      | (TaskRecordEntity & { assets?: Asset[]; batchItems?: TaskBatchItem[] })
+      | null,
+    sourceAction: SupportedTaskSourceAction | undefined,
+    assetIds: string[],
+  ) {
+    if (
+      !this.isBatchTaskEntity(sourceTask) ||
+      (sourceAction !== "edit" && sourceAction !== "variant")
+    ) {
+      return;
+    }
+
+    if (assetIds.length !== 1) {
+      throw new BadRequestException(
+        "Choose exactly one successful batch image before re-editing a batch task.",
+      );
+    }
+
+    const successfulAssetIds = new Set(
+      (sourceTask?.batchItems ?? [])
+        .filter((item) => item.status === "succeeded" && item.assetId)
+        .map((item) => item.assetId),
+    );
+    if (!successfulAssetIds.has(assetIds[0])) {
+      throw new BadRequestException(
+        "Choose one successful batch image from the source batch task.",
+      );
+    }
   }
 
   private async resolveTaskConversation(
@@ -2267,6 +2839,14 @@ export class ApiService implements OnModuleInit {
     const aliases: Record<string, string> = {
       "admin.retry_requested": "retry_requested",
       "admin.retry_created": "retried",
+      "batch.queued": "queued",
+      "batch.submitted": "submitted",
+      "batch.running": "running",
+      "batch.item.succeeded": "running",
+      "batch.item.failed": "running",
+      "batch.retry_failed_slots_requested": "retry_requested",
+      "batch.succeeded": "succeeded",
+      "batch.failed": "failed",
     };
     const normalized = aliases[eventType] ?? eventType;
 

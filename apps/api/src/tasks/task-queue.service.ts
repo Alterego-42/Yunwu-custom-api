@@ -13,7 +13,9 @@ export class TaskQueueService implements OnModuleDestroy {
   private readonly logger = new Logger(TaskQueueService.name);
   private readonly connection: IORedis;
   private readonly queue: Queue<TaskQueueJobData>;
+  private readonly batchQueue: Queue<TaskQueueJobData>;
   private readonly queueName: string;
+  private readonly batchQueueName: string;
   private readonly handleConnectionError = (error: Error) => {
     this.logger.error(`Task queue redis error: ${error.message}`);
   };
@@ -41,11 +43,25 @@ export class TaskQueueService implements OnModuleDestroy {
         removeOnFail: { age: 604_800 },
       },
     });
+    this.batchQueueName = this.config.get<string>(
+      "tasks.batchQueueName",
+      "yunwu-image-batch-tasks",
+    );
+    this.batchQueue = new Queue<TaskQueueJobData>(this.batchQueueName, {
+      connection: this.connection,
+      defaultJobOptions: {
+        attempts: 3,
+        backoff: { type: "exponential", delay: 5_000 },
+        removeOnComplete: { age: 86_400, count: 1_000 },
+        removeOnFail: { age: 604_800 },
+      },
+    });
   }
 
   async onModuleDestroy() {
     this.connection.off("error", this.handleConnectionError);
     await this.queue.close();
+    await this.batchQueue.close();
     this.connection.disconnect();
   }
 
@@ -58,5 +74,19 @@ export class TaskQueueService implements OnModuleDestroy {
       },
     );
     this.logger.debug(`Queued task ${taskId} from ${source}.`);
+  }
+
+  async enqueueBatchTask(
+    taskId: string,
+    source = "api",
+    options: { dedupe?: boolean } = {},
+  ) {
+    const dedupe = options.dedupe ?? true;
+    await this.batchQueue.add(
+      TASK_QUEUE_JOB_NAME,
+      { taskId },
+      dedupe ? { jobId: taskId } : {},
+    );
+    this.logger.debug(`Queued batch task ${taskId} from ${source}.`);
   }
 }

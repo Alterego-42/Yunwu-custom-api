@@ -30,6 +30,27 @@ const imageSizeOptions = [
   { value: "784x1168", label: "Grok 竖图 784x1168" },
 ] as const;
 
+const MIN_BATCH_COUNT = 1;
+const MAX_BATCH_COUNT = 20;
+
+function clampBatchCount(value: unknown) {
+  const nextValue =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : MIN_BATCH_COUNT;
+
+  if (!Number.isFinite(nextValue)) {
+    return MIN_BATCH_COUNT;
+  }
+
+  return Math.min(
+    MAX_BATCH_COUNT,
+    Math.max(MIN_BATCH_COUNT, Math.round(nextValue)),
+  );
+}
+
 function normalizeImageSizeParam(value: unknown) {
   return imageSizeOptions.some((option) => option.value === value)
     ? (value as (typeof imageSizeOptions)[number]["value"])
@@ -73,6 +94,7 @@ export function Composer({
     model?: string;
     capability?: CapabilityType;
     params?: Record<string, unknown>;
+    batchCount?: number;
   };
   placeholder?: string;
   submitLabel?: string;
@@ -85,6 +107,7 @@ export function Composer({
     capability: CapabilityType;
     assetIds?: string[];
     params?: Record<string, unknown>;
+    batchCount?: number;
   }) => Promise<void>;
 }) {
   const enabledModels = useMemo(() => models.filter((item) => item.enabled), [models]);
@@ -99,6 +122,7 @@ export function Composer({
   const [model, setModel] = useState(initialDraft?.model ?? "");
   const [capability, setCapability] = useState<CapabilityType>(initialDraft?.capability ?? "image.generate");
   const [params, setParams] = useState<Record<string, unknown>>(initialDraft?.params ?? {});
+  const [batchCount, setBatchCount] = useState(clampBatchCount(initialDraft?.batchCount));
   const selectedSize = normalizeImageSizeParam(params.size);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -107,7 +131,8 @@ export function Composer({
     setModel(initialDraft?.model ?? "");
     setCapability(initialDraft?.capability ?? "image.generate");
     setParams(initialDraft?.params ?? {});
-  }, [initialSignature, initialDraft?.capability, initialDraft?.model, initialDraft?.params, initialDraft?.prompt]);
+    setBatchCount(clampBatchCount(initialDraft?.batchCount));
+  }, [initialSignature, initialDraft?.batchCount, initialDraft?.capability, initialDraft?.model, initialDraft?.params, initialDraft?.prompt]);
 
   const effectiveCapability = resolveComposerCapability({
     requestedCapability: capability,
@@ -204,6 +229,7 @@ export function Composer({
                 ...paramsWithoutSize,
                 size: selectedSize,
               },
+        batchCount,
       });
       setPrompt("");
     } finally {
@@ -364,11 +390,22 @@ export function Composer({
               </select>
               <ChevronDown className="h-3.5 w-3.5 shrink-0" />
             </label>
+            <label className="inline-flex shrink-0 items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.92)] px-2.5 py-1.5 text-xs text-foreground">
+              <span className="shrink-0">并发次数</span>
+              <input
+                aria-label="并发次数"
+                type="number"
+                min={MIN_BATCH_COUNT}
+                max={MAX_BATCH_COUNT}
+                step={1}
+                className="h-6 w-[68px] rounded-full bg-[hsl(var(--surface-container-lowest))] px-2 text-center tabular-nums text-foreground outline-none"
+                value={batchCount}
+                onChange={(event) => setBatchCount(clampBatchCount(event.target.value))}
+                disabled={disabled || isSubmitting}
+              />
+            </label>
           </div>
-          <div className="flex items-center gap-2">
-            <Button variant="ghost" size="sm" disabled>
-              保存草稿
-            </Button>
+          <div className="flex shrink-0 items-center justify-end gap-2">
             <Button
               size="sm"
               onClick={handleSubmit}

@@ -3,10 +3,13 @@ import {
   IsBoolean,
   IsArray,
   IsIn,
+  IsInt,
   IsObject,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
+  Min,
 } from "class-validator";
 import type { CapabilityType } from "../api.types";
 
@@ -51,4 +54,10 @@ export class CreateTaskDto {
   @IsOptional()
   @IsBoolean()
   fork?: boolean;
+
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(20)
+  batchCount?: number;
 }

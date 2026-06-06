@@ -217,7 +217,7 @@ describe("create page", () => {
     expect(await screen.findByText("来源任务")).toBeTruthy();
     await waitFor(() => {
       expect(screen.getByLabelText("模型")).toHaveProperty("value", "edit-image-model");
-      expect(screen.getByText("asset_generated_1")).toBeTruthy();
+      expect(screen.getAllByText("asset_generated_1").length).toBeGreaterThan(0);
       expect(screen.getByRole("button", { name: "提交并进入工作台" })).toHaveProperty(
         "disabled",
         false,
@@ -235,6 +235,127 @@ describe("create page", () => {
           capability: "image.edit",
           assetIds: ["asset_generated_1"],
           sourceTaskId: "task_source",
+          sourceAction: "edit",
+          fork: false,
+        }),
+      );
+    });
+  });
+
+  it("uses the selected batch asset as the only edit reference", async () => {
+    apiClientMock.listModels.mockResolvedValue([
+      createModel({
+        id: "text-image-only",
+        name: "Text Image Only",
+        type: "image-generation",
+        capabilityTypes: ["image.generate"],
+      }),
+      createModel({
+        id: "edit-image-model",
+        name: "Edit Image Model",
+        capabilityTypes: ["image.generate", "image.edit"],
+      }),
+    ]);
+    apiClientMock.getTask.mockResolvedValue(
+      createTask({
+        id: "task_batch_source",
+        status: "succeeded",
+        modelId: "text-image-only",
+        conversationId: "conv_source",
+        batch: {
+          isBatch: true,
+          batchSize: 2,
+          returnedCount: 2,
+          successCount: 2,
+          failedCount: 0,
+          loadingCount: 0,
+        },
+        batchItems: [
+          {
+            id: "slot_1",
+            taskId: "task_batch_source",
+            batchIndex: 0,
+            status: "succeeded",
+            progress: 100,
+            assetId: "asset_batch_1",
+            attempt: 1,
+            createdAt: "2026-04-29T08:00:00.000Z",
+            updatedAt: "2026-04-29T08:00:00.000Z",
+          },
+          {
+            id: "slot_2",
+            taskId: "task_batch_source",
+            batchIndex: 1,
+            status: "succeeded",
+            progress: 100,
+            assetId: "asset_batch_2",
+            attempt: 1,
+            createdAt: "2026-04-29T08:00:00.000Z",
+            updatedAt: "2026-04-29T08:00:00.000Z",
+          },
+        ],
+        outputSummary: {
+          mocked: false,
+          generatedAssetIds: ["asset_batch_1", "asset_batch_2"],
+          assets: [
+            {
+              id: "asset_batch_1",
+              url: "/api/assets/asset_batch_1/content",
+              mimeType: "image/png",
+              width: 1024,
+              height: 1024,
+              batchIndex: 0,
+              batchItemId: "slot_1",
+            },
+            {
+              id: "asset_batch_2",
+              url: "/api/assets/asset_batch_2/content",
+              mimeType: "image/png",
+              width: 1536,
+              height: 1024,
+              batchIndex: 1,
+              batchItemId: "slot_2",
+            },
+          ],
+        },
+      }),
+    );
+    apiClientMock.createTask.mockResolvedValue({
+      task: createTask({
+        capability: "image.edit",
+        modelId: "edit-image-model",
+        assetIds: ["asset_batch_2"],
+        sourceTaskId: "task_batch_source",
+        sourceAction: "edit",
+      }),
+      conversation: createConversation(),
+    });
+
+    renderCreatePage("/create?fromTaskId=task_batch_source&assetId=asset_batch_2&mode=edit");
+
+    expect(await screen.findByText("再编辑图片")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByLabelText("模型")).toHaveProperty("value", "edit-image-model");
+      expect(screen.getAllByText("asset_batch_2").length).toBeGreaterThan(0);
+      expect(screen.getByRole("button", { name: "提交并进入工作台" })).toHaveProperty(
+        "disabled",
+        false,
+      );
+    });
+    expect(screen.getAllByRole("img", { name: "1536 × 1024" }).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "提交并进入工作台" }));
+
+    await waitFor(() => {
+      expect(apiClientMock.createTask).toHaveBeenCalledWith(
+        expect.objectContaining({
+          conversationId: "conv_source",
+          prompt: "draw a clean workspace",
+          model: "edit-image-model",
+          capability: "image.edit",
+          assetIds: ["asset_batch_2"],
+          batchCount: 1,
+          sourceTaskId: "task_batch_source",
           sourceAction: "edit",
           fork: false,
         }),

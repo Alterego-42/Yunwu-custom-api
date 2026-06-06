@@ -28,6 +28,7 @@ import type {
   ConversationDetail,
   ModelRecord,
   UiTask,
+  UiTaskAsset,
   UiTaskRoundNavigation,
 } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
@@ -149,11 +150,13 @@ function TaskBubble({
   actions,
   roundNavigation,
   isFocused,
+  onEditAsset,
 }: {
   task: UiTask;
   actions?: ReactNode;
   roundNavigation?: TaskRoundNavigation;
   isFocused?: boolean;
+  onEditAsset?: (asset: UiTaskAsset) => void;
 }) {
   const isActive = task.status === "queued" || task.status === "submitted" || task.status === "running";
   const isSuccess = task.status === "succeeded";
@@ -186,7 +189,13 @@ function TaskBubble({
             {formatRelativeTime(task.updatedAt ?? task.createdAt)}
           </p>
         </div>
-        <TaskCard task={task} actions={actions} roundNavigation={roundNavigation} isFocused={isFocused} />
+        <TaskCard
+          task={task}
+          actions={actions}
+          roundNavigation={roundNavigation}
+          isFocused={isFocused}
+          onEditAsset={onEditAsset}
+        />
       </div>
     </div>
   );
@@ -210,6 +219,7 @@ export function ChatPanel({
   onRemoveUpload,
   onSubmitTask,
   renderTaskActions,
+  onEditTaskAsset,
   taskRoundNavigationById,
   focusedTaskId,
 }: {
@@ -227,6 +237,7 @@ export function ChatPanel({
     model?: string;
     capability?: CapabilityType;
     params?: Record<string, unknown>;
+    batchCount?: number;
   };
   composerSubmitLabel?: string;
   composerHint?: string | null;
@@ -239,8 +250,10 @@ export function ChatPanel({
     capability: CapabilityType;
     assetIds?: string[];
     params?: Record<string, unknown>;
+    batchCount?: number;
   }) => Promise<void>;
   renderTaskActions?: (task: UiTask) => ReactNode;
+  onEditTaskAsset?: (task: UiTask, asset: UiTaskAsset) => void;
   taskRoundNavigationById?: Map<string, TaskRoundNavigation>;
   focusedTaskId?: string;
 }) {
@@ -359,6 +372,7 @@ export function ChatPanel({
                   actions={renderTaskActions?.(item.task)}
                   roundNavigation={taskRoundNavigationById?.get(item.task.id)}
                   isFocused={focusedTaskId === item.task.id}
+                  onEditAsset={(asset) => onEditTaskAsset?.(item.task, asset)}
                 />
               ),
             )}

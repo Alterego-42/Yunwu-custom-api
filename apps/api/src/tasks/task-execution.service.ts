@@ -1,5 +1,11 @@
 import { Injectable, Logger } from "@nestjs/common";
-import { Prisma, type Asset, type TaskStatus } from "@prisma/client";
+import {
+  Prisma,
+  type Asset,
+  type Task,
+  type TaskBatchItem,
+  type TaskStatus,
+} from "@prisma/client";
 import { randomUUID } from "node:crypto";
 import { AssetStorageService } from "../api/storage/asset-storage.service";
 import { ConversationEventsService } from "../api/conversation-events.service";
@@ -20,6 +26,7 @@ interface TaskInputShape {
   assetIds?: string[];
   params?: Record<string, unknown>;
   providerBaseUrl?: string;
+  batchCount?: number;
 }
 
 interface GeneratedOutputLocation {
@@ -31,6 +38,19 @@ interface GeneratedOutputLocation {
     downloadError?: string;
   };
 }
+
+type BatchParentTask = Task & {
+  assets: Asset[];
+  batchItems: TaskBatchItem[];
+};
+
+type BatchExecutionContext = {
+  capability: SupportedTaskCapability;
+  input: TaskInputShape;
+  orderedInputAssets: Asset[];
+  providerApiKey?: string;
+  inputAssetIds: string[];
+};
 
 @Injectable()
 export class TaskExecutionService {
@@ -52,6 +72,7 @@ export class TaskExecutionService {
       include: {
         conversation: true,
         assets: true,
+        batchItems: { orderBy: { batchIndex: "asc" } },
       },
     });
 
@@ -64,6 +85,11 @@ export class TaskExecutionService {
     }
 
     const input = this.asRecord(task.input) as TaskInputShape;
+    if ((input.batchCount ?? 1) > 1 || (task.batchItems?.length ?? 0) > 0) {
+      await this.executeBatchTask(task.id);
+      return;
+    }
+
     const capability = this.asSupportedCapability(task.type);
 
     await this.prisma.task.update({
@@ -267,6 +293,564 @@ export class TaskExecutionService {
 
       this.logger.error(`Task ${task.id} failed: ${failure.errorMessage}`);
     }
+  }
+
+  private async executeBatchTask(taskId: string) {
+    const task = await this.prisma.task.findUnique({
+      where: { id: taskId },
+      include: {
+        conversation: true,
+        assets: true,
+        batchItems: { orderBy: { batchIndex: "asc" } },
+      },
+    });
+
+    if (!task || !task.conversationId || !task.userId || !task.conversation) {
+      return;
+    }
+
+    if (this.isTerminalStatus(task.status)) {
+      return;
+    }
+
+    const input = this.asRecord(task.input) as TaskInputShape;
+    const capability = this.asSupportedCapability(task.type);
+    const targetItems = task.batchItems.filter((item) =>
+      ["queued", "submitted", "running"].includes(item.status),
+    );
+
+    if (targetItems.length === 0) {
+      return;
+    }
+
+    await this.prisma.task.update({
+      where: { id: task.id },
+      data: {
+        status: "submitted",
+        progress: Math.max(task.progress, 20),
+        errorMessage: null,
+      },
+    });
+    await this.recordTaskEvent(task.id, "batch.submitted", "submitted", {
+      summary: "Batch task submitted.",
+      title: "Batch submitted",
+      detail: "A worker accepted the batch task and is preparing all slots.",
+      progress: Math.max(task.progress, 20),
+    });
+    this.publishTaskUpdated(task.conversationId, task.id, "submitted");
+
+    let inputAssetIds: string[] = [];
+    try {
+      const inputAssets = input.assetIds?.length
+        ? await this.prisma.asset.findMany({
+            where: {
+              id: { in: input.assetIds },
+              userId: task.userId,
+              status: { in: ["ready", "deleted"] },
+              type: { in: ["upload", "generated"] },
+            },
+          })
+        : [];
+      const inputAssetsById = new Map(
+        inputAssets.map((asset) => [asset.id, asset]),
+      );
+      const orderedInputAssets = (input.assetIds ?? [])
+        .map((assetId) => inputAssetsById.get(assetId))
+        .filter((asset): asset is Asset => Boolean(asset));
+      inputAssetIds = orderedInputAssets.map((asset) => asset.id);
+
+      await this.prisma.taskBatchItem.updateMany({
+        where: {
+          taskId: task.id,
+          id: { in: targetItems.map((item) => item.id) },
+        },
+        data: {
+          status: "running",
+          progress: 20,
+          errorMessage: null,
+          startedAt: new Date(),
+          completedAt: null,
+          attempt: { increment: 1 },
+        },
+      });
+      await this.prisma.task.update({
+        where: { id: task.id },
+        data: {
+          status: "running",
+          progress: 20,
+          output: {
+            ...this.asRecord(task.output),
+            ...this.buildPersistedBatchSummary(
+              await this.prisma.taskBatchItem.findMany({
+                where: { taskId: task.id },
+                orderBy: { batchIndex: "asc" },
+              }),
+            ),
+            inputAssetIds,
+          } as Prisma.InputJsonObject,
+        },
+      });
+      await this.recordTaskEvent(task.id, "batch.running", "running", {
+        summary: "Batch task running.",
+        title: "Batch running",
+        detail: `Running ${targetItems.length} batch slot(s) concurrently.`,
+        progress: 20,
+      });
+      this.publishTaskUpdated(task.conversationId, task.id, "running");
+
+      const baseConfig = await this.openaiCompatible.getBaseConfig();
+      const providerApiKey = await this.getUserProviderApiKey(task.userId);
+      const requestSummary = this.buildProviderRequestSummary(
+        {
+          ...baseConfig,
+          hasApiKey: Boolean(providerApiKey) || baseConfig.hasApiKey,
+        },
+        capability,
+        input,
+        orderedInputAssets,
+      );
+      await this.recordTaskEvent(task.id, "batch.provider.request", "running", {
+        summary: "Sanitized upstream batch request summary recorded.",
+        details: {
+          ...requestSummary,
+          batchSize: task.batchItems.length,
+          targetSlotCount: targetItems.length,
+        },
+      });
+
+      const context: BatchExecutionContext = {
+        capability,
+        input,
+        orderedInputAssets,
+        providerApiKey,
+        inputAssetIds,
+      };
+      await Promise.allSettled(
+        targetItems.map((item) =>
+          this.executeBatchItem(task, item, context),
+        ),
+      );
+
+      const finalItems = await this.prisma.taskBatchItem.findMany({
+        where: { taskId: task.id },
+        orderBy: { batchIndex: "asc" },
+      });
+      const summary = this.buildPersistedBatchSummary(finalItems);
+      const finalStatus: TaskStatus =
+        summary.successCount > 0 ? "succeeded" : "failed";
+      const firstFailureMessage =
+        typeof summary.firstFailureMessage === "string"
+          ? summary.firstFailureMessage
+          : undefined;
+
+      await this.prisma.task.update({
+        where: { id: task.id },
+        data: {
+          status: finalStatus,
+          progress: 100,
+          errorMessage:
+            finalStatus === "failed"
+              ? firstFailureMessage ?? "All batch slots failed."
+              : null,
+          output: {
+            ...this.asRecord(task.output),
+            ...summary,
+            inputAssetIds: context.inputAssetIds,
+            completedAt: new Date().toISOString(),
+          } as Prisma.InputJsonObject,
+        },
+      });
+      await this.recordTaskEvent(
+        task.id,
+        finalStatus === "succeeded" ? "batch.succeeded" : "batch.failed",
+        finalStatus,
+        {
+          summary:
+            finalStatus === "succeeded"
+              ? "Batch task completed."
+              : "Batch task failed.",
+          title:
+            finalStatus === "succeeded"
+              ? summary.failedCount > 0
+                ? "Batch partially completed"
+                : "Batch completed"
+              : "Batch failed",
+          detail:
+            finalStatus === "succeeded"
+              ? `Batch completed with ${summary.successCount} success(es) and ${summary.failedCount} failure(s).`
+              : "Every batch slot failed.",
+          progress: 100,
+          assetIds: summary.assetIds,
+          details: summary,
+          errorMessage:
+            finalStatus === "failed" ? firstFailureMessage : undefined,
+        },
+      );
+
+      await this.prisma.message.create({
+        data: {
+          conversationId: task.conversationId,
+          role: "assistant",
+          content:
+            finalStatus === "succeeded"
+              ? "Batch image task completed."
+              : (firstFailureMessage ?? "Batch image task failed."),
+          metadata: {
+            type: finalStatus === "succeeded" ? "image_grid" : "error_card",
+            taskId: task.id,
+            assetIds: summary.assetIds,
+            inputAssetIds: context.inputAssetIds,
+            batch: summary,
+          },
+        },
+      });
+      await this.providerState.persistTestFinished({
+        taskId: task.id,
+        status: finalStatus,
+        ...(finalStatus === "failed" && firstFailureMessage
+          ? { error: firstFailureMessage }
+          : {}),
+      });
+      await this.providerAlerts.refreshAlerts(await this.providerState.getState());
+      this.publishTaskUpdated(task.conversationId, task.id, finalStatus);
+    } catch (error) {
+      const failure = this.buildFailureSummary(error);
+      let summary:
+        | ReturnType<TaskExecutionService["buildPersistedBatchSummary"]>
+        | undefined;
+
+      try {
+        await this.prisma.taskBatchItem.updateMany({
+          where: {
+            taskId: task.id,
+            id: { in: targetItems.map((item) => item.id) },
+            status: { in: ["queued", "submitted", "running"] },
+          },
+          data: {
+            status: "failed",
+            progress: 100,
+            assetId: null,
+            errorMessage: failure.errorMessage,
+            output: {
+              errorMessage: failure.errorMessage,
+              category: failure.category,
+              retryable: failure.retryable,
+              statusCode: failure.statusCode,
+            } as Prisma.InputJsonObject,
+            completedAt: new Date(),
+          },
+        });
+
+        summary = this.buildPersistedBatchSummary(
+          await this.prisma.taskBatchItem.findMany({
+            where: { taskId: task.id },
+            orderBy: { batchIndex: "asc" },
+          }),
+        );
+      } catch (batchItemError) {
+        const message =
+          batchItemError instanceof Error
+            ? batchItemError.message
+            : "Unknown batch item update error.";
+        this.logger.warn(
+          `Failed to mark batch slots for task ${task.id}: ${message}`,
+        );
+      }
+
+      const finalStatus: TaskStatus =
+        summary && summary.successCount > 0 ? "succeeded" : "failed";
+      await this.prisma.task.update({
+        where: { id: task.id },
+        data: {
+          status: finalStatus,
+          progress: 100,
+          errorMessage:
+            finalStatus === "failed" ? failure.errorMessage : null,
+          ...(summary
+            ? {
+                output: {
+                  ...this.asRecord(task.output),
+                  ...summary,
+                  inputAssetIds,
+                  completedAt: new Date().toISOString(),
+                } as Prisma.InputJsonObject,
+              }
+            : {}),
+        },
+      });
+      await this.recordTaskEvent(
+        task.id,
+        finalStatus === "succeeded" ? "batch.succeeded" : "batch.failed",
+        finalStatus,
+        {
+          summary:
+            finalStatus === "succeeded"
+              ? "Batch task completed."
+              : "Batch task failed.",
+          title:
+            finalStatus === "succeeded"
+              ? summary?.failedCount
+                ? "Batch partially completed"
+                : "Batch completed"
+              : failure.title,
+          detail:
+            finalStatus === "succeeded" && summary
+              ? `Batch completed with ${summary.successCount} success(es) and ${summary.failedCount} failure(s).`
+              : failure.detail,
+          errorMessage:
+            finalStatus === "failed" ? failure.errorMessage : undefined,
+          progress: 100,
+          assetIds: summary?.assetIds,
+          details: {
+            ...(summary ?? {}),
+            category: failure.category,
+            retryable: failure.retryable,
+            statusCode: failure.statusCode,
+            errorStage: failure.errorStage,
+            errorKind: failure.errorKind,
+          },
+        },
+      );
+      await this.prisma.message.create({
+        data: {
+          conversationId: task.conversationId,
+          role: "assistant",
+          content:
+            finalStatus === "succeeded"
+              ? "Batch image task completed."
+              : failure.errorMessage,
+          metadata: {
+            type: finalStatus === "succeeded" ? "image_grid" : "error_card",
+            taskId: task.id,
+            inputAssetIds,
+            ...(summary
+              ? { assetIds: summary.assetIds, batch: summary }
+              : {}),
+          },
+        },
+      });
+      await this.providerState.persistTestFinished({
+        taskId: task.id,
+        status: finalStatus,
+        ...(finalStatus === "failed" ? { error: failure.errorMessage } : {}),
+      });
+      await this.providerAlerts.refreshAlerts(await this.providerState.getState());
+      this.publishTaskUpdated(task.conversationId, task.id, finalStatus);
+      this.logger.error(`Batch task ${task.id} failed: ${failure.errorMessage}`);
+    }
+  }
+
+  private async executeBatchItem(
+    task: BatchParentTask,
+    item: TaskBatchItem,
+    context: BatchExecutionContext,
+  ) {
+    try {
+      const result = await this.openaiCompatible.createImageTask({
+        capability: context.capability,
+        model: context.input.model ?? "gpt-image-1",
+        prompt: context.input.prompt ?? "",
+        baseUrl: context.input.providerBaseUrl,
+        apiKey: context.providerApiKey,
+        allowMock: false,
+        inputAssets: context.orderedInputAssets.map((asset) => ({
+          id: asset.id,
+          url: asset.url,
+          mimeType: asset.mimeType,
+          storageKey: asset.storageKey,
+        })),
+        params: context.input.params,
+      });
+      const storedOutput = await this.storeGeneratedOutput(task.id, result);
+      const asset = await this.prisma.asset.create({
+        data: {
+          userId: task.userId,
+          taskId: task.id,
+          type: "generated",
+          mimeType: result.mimeType,
+          storageKey: storedOutput.storageKey,
+          url: storedOutput.url,
+          status: "ready",
+          metadata: {
+            batchTaskId: task.id,
+            batchItemId: item.id,
+            batchIndex: item.batchIndex,
+            width: result.width,
+            height: result.height,
+            mocked: result.mocked,
+            provider: "openai-compatible",
+            responseSummary: result.responseSummary,
+            storage: storedOutput.storage.kind,
+            ...(storedOutput.storage.objectUrl
+              ? { objectUrl: storedOutput.storage.objectUrl }
+              : {}),
+          } as Prisma.InputJsonObject,
+        },
+      });
+
+      await this.prisma.taskBatchItem.update({
+        where: { id: item.id },
+        data: {
+          status: "succeeded",
+          progress: 100,
+          assetId: asset.id,
+          errorMessage: null,
+          providerSummary: result.responseSummary as Prisma.InputJsonObject,
+          output: {
+            assetId: asset.id,
+            mocked: result.mocked,
+            width: result.width,
+            height: result.height,
+          } as Prisma.InputJsonObject,
+          completedAt: new Date(),
+        },
+      });
+      const summary = await this.refreshBatchParentSummary(
+        task.id,
+        context.inputAssetIds,
+      );
+      await this.recordTaskEvent(task.id, "batch.item.succeeded", "running", {
+        summary: `Batch item ${item.batchIndex + 1} completed.`,
+        title: "Batch item completed",
+        detail: `Slot ${item.batchIndex + 1} completed successfully.`,
+        progress: this.progressForBatchSummary(summary),
+        assetIds: [asset.id],
+        details: {
+          batchIndex: item.batchIndex,
+          batchItemId: item.id,
+          assetId: asset.id,
+          mocked: result.mocked,
+        },
+      });
+      if (task.conversationId) {
+        this.publishTaskUpdated(task.conversationId, task.id, "running");
+      }
+    } catch (error) {
+      const failure = this.buildFailureSummary(error);
+      const providerSummary =
+        error instanceof OpenAICompatibleRequestError
+          ? this.sanitizeProviderResponseSummary(error.responseSummary)
+          : undefined;
+
+      await this.prisma.taskBatchItem.update({
+        where: { id: item.id },
+        data: {
+          status: "failed",
+          progress: 100,
+          assetId: null,
+          errorMessage: failure.errorMessage,
+          providerSummary: providerSummary
+            ? (providerSummary as Prisma.InputJsonObject)
+            : Prisma.JsonNull,
+          output: {
+            errorMessage: failure.errorMessage,
+            category: failure.category,
+            retryable: failure.retryable,
+            statusCode: failure.statusCode,
+          } as Prisma.InputJsonObject,
+          completedAt: new Date(),
+        },
+      });
+      const summary = await this.refreshBatchParentSummary(
+        task.id,
+        context.inputAssetIds,
+      );
+      await this.recordTaskEvent(task.id, "batch.item.failed", "running", {
+        summary: `Batch item ${item.batchIndex + 1} failed.`,
+        title: failure.title,
+        detail: failure.detail,
+        errorMessage: failure.errorMessage,
+        progress: this.progressForBatchSummary(summary),
+        details: {
+          batchIndex: item.batchIndex,
+          batchItemId: item.id,
+          category: failure.category,
+          retryable: failure.retryable,
+          statusCode: failure.statusCode,
+          errorStage: failure.errorStage,
+          errorKind: failure.errorKind,
+        },
+      });
+      if (task.conversationId) {
+        this.publishTaskUpdated(task.conversationId, task.id, "running");
+      }
+      this.logger.warn(
+        `Batch task ${task.id} slot ${item.batchIndex} failed: ${failure.errorMessage}`,
+      );
+    }
+  }
+
+  private async refreshBatchParentSummary(
+    taskId: string,
+    inputAssetIds: string[],
+  ) {
+    const [task, items] = await Promise.all([
+      this.prisma.task.findUnique({
+        where: { id: taskId },
+        select: { output: true },
+      }),
+      this.prisma.taskBatchItem.findMany({
+        where: { taskId },
+        orderBy: { batchIndex: "asc" },
+      }),
+    ]);
+    const summary = this.buildPersistedBatchSummary(items);
+
+    await this.prisma.task.update({
+      where: { id: taskId },
+      data: {
+        progress: this.progressForBatchSummary(summary),
+        output: {
+          ...this.asRecord(task?.output),
+          ...summary,
+          inputAssetIds,
+        } as Prisma.InputJsonObject,
+      },
+    });
+
+    return summary;
+  }
+
+  private buildPersistedBatchSummary(items: TaskBatchItem[]) {
+    const orderedItems = items
+      .slice()
+      .sort((left, right) => left.batchIndex - right.batchIndex);
+    const successItems = orderedItems.filter(
+      (item) => item.status === "succeeded",
+    );
+    const failedItems = orderedItems.filter((item) => item.status === "failed");
+    const returnedCount = successItems.length + failedItems.length;
+    const firstFailureMessage = failedItems.find(
+      (item) => item.errorMessage,
+    )?.errorMessage;
+
+    return {
+      batchSize: orderedItems.length,
+      returnedCount,
+      successCount: successItems.length,
+      failedCount: failedItems.length,
+      loadingCount: Math.max(0, orderedItems.length - returnedCount),
+      assetIds: successItems
+        .map((item) => item.assetId)
+        .filter((assetId): assetId is string => Boolean(assetId)),
+      ...(firstFailureMessage ? { firstFailureMessage } : {}),
+      partialSuccess: successItems.length > 0 && failedItems.length > 0,
+    };
+  }
+
+  private progressForBatchSummary(summary: {
+    batchSize: number;
+    returnedCount: number;
+  }) {
+    if (summary.batchSize <= 0) {
+      return 0;
+    }
+
+    if (summary.returnedCount >= summary.batchSize) {
+      return 100;
+    }
+
+    return 20 + Math.round((summary.returnedCount / summary.batchSize) * 75);
   }
 
   private asRecord(value: unknown): Record<string, unknown> {

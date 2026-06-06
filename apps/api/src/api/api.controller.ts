@@ -57,6 +57,7 @@ import type { AuthenticatedUser } from "../auth/auth.types";
 import { CheckUserApiKeyDto } from "./dto/check-user-api-key.dto";
 import { CreateConversationDto } from "./dto/create-conversation.dto";
 import { CreateTaskDto } from "./dto/create-task.dto";
+import { RetryTaskDto } from "./dto/retry-task.dto";
 import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
 import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
@@ -262,8 +263,9 @@ export class ApiController {
   retryTask(
     @CurrentUser() user: AuthenticatedUser,
     @Param("id") id: string,
+    @Body() input: RetryTaskDto = {},
   ): Promise<RetryTaskResponse> {
-    return this.api.retryTask(user, id);
+    return this.api.retryTask(user, id, input);
   }
 
   @Get("tasks/:id")

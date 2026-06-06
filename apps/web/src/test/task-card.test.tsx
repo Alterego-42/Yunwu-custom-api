@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { TaskCard } from "@/components/cards/task-card";
@@ -69,5 +69,84 @@ describe("task card", () => {
     fireEvent.click(screen.getByRole("button", { name: "预览参考素材 参考图" }));
 
     expect(screen.getByRole("dialog", { name: "参考图 预览" })).toBeTruthy();
+  });
+
+  it("renders batch progress and opens successful batch results only", () => {
+    const onEditAsset = vi.fn();
+    const batchAsset = {
+      id: "asset_batch_1",
+      type: "generated" as const,
+      url: "/api/assets/asset_batch_1/content",
+      mimeType: "image/png",
+      createdAt: "2026-04-29T08:02:00.000Z",
+      label: "批量结果 1",
+    };
+
+    render(
+      <TaskCard
+        task={createUiTask({
+          title: "批量生成",
+          resultAssets: [],
+          batch: {
+            isBatch: true,
+            batchSize: 3,
+            returnedCount: 2,
+            successCount: 1,
+            failedCount: 1,
+            loadingCount: 1,
+            firstFailureMessage: "Provider rate limited.",
+            partialSuccess: true,
+          },
+          batchSlots: [
+            {
+              id: "slot_1",
+              taskId: "task_1",
+              batchIndex: 0,
+              status: "succeeded",
+              progress: 100,
+              asset: batchAsset,
+              attempt: 1,
+            },
+            {
+              id: "slot_2",
+              taskId: "task_1",
+              batchIndex: 1,
+              status: "failed",
+              progress: 100,
+              errorMessage: "Provider rate limited.",
+              attempt: 1,
+            },
+            {
+              id: "slot_3",
+              taskId: "task_1",
+              batchIndex: 2,
+              status: "running",
+              progress: 20,
+              attempt: 1,
+            },
+          ],
+        })}
+        onEditAsset={onEditAsset}
+      />,
+    );
+
+    expect(screen.getByText("部分完成")).toBeTruthy();
+    expect(screen.getByText("共 3 个")).toBeTruthy();
+    expect(screen.getByText("已返回 2")).toBeTruthy();
+    expect(screen.getByText("成功 1")).toBeTruthy();
+    expect(screen.getByText("处理中 1")).toBeTruthy();
+    expect(screen.getByText("失败 1")).toBeTruthy();
+    expect(screen.getByText("首个失败：Provider rate limited.")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看批量结果" }));
+
+    const dialog = screen.getByRole("dialog", { name: "批量结果" });
+    expect(within(dialog).getByRole("img", { name: "批量结果 1" })).toBeTruthy();
+    expect(within(dialog).getByText("#1")).toBeTruthy();
+    expect(within(dialog).queryByText("#2")).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /再编辑/ }));
+
+    expect(onEditAsset).toHaveBeenCalledWith(batchAsset);
   });
 });

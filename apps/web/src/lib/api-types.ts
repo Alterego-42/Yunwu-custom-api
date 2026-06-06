@@ -5,6 +5,8 @@ import type {
   ModelRecord,
   TaskMessage,
   TaskRecord as SharedTaskRecord,
+  TaskBatchItemRecord,
+  TaskBatchSummary,
   TaskSourceAction,
   TaskStatus,
 } from "@yunwu/shared";
@@ -64,6 +66,7 @@ export type CreateTaskInput = {
   sourceTaskId?: string;
   sourceAction?: TaskSourceAction;
   fork?: boolean;
+  batchCount?: number;
 };
 
 export type CreateTaskResponse = {
@@ -81,7 +84,9 @@ export type UploadAssetResponse = {
 };
 
 export type LibraryItemRecord = {
+  kind?: "single" | "batch";
   asset: AssetRecord;
+  assets?: AssetRecord[];
   task: TaskRecord;
   conversation?: ConversationSummary;
 };
@@ -314,6 +319,17 @@ export type UiTaskAsset = {
   label: string;
 };
 
+export type UiBatchSlot = {
+  id: string;
+  taskId: string;
+  batchIndex: number;
+  status: TaskStatus;
+  progress: number;
+  asset?: UiTaskAsset;
+  errorMessage?: string;
+  attempt: number;
+};
+
 export type UiTask = {
   id: string;
   title: string;
@@ -340,6 +356,8 @@ export type UiTask = {
   sourceAction?: TaskSourceAction;
   outputSummary?: Record<string, unknown>;
   inputSummary?: Record<string, unknown>;
+  batch?: TaskBatchSummary;
+  batchSlots?: UiBatchSlot[];
 };
 
 export type UiTaskRoundNavigation = {
@@ -368,6 +386,8 @@ export type {
   ConversationMetadata,
   ModelRecord,
   TaskMessage,
+  TaskBatchItemRecord,
+  TaskBatchSummary,
   TaskSourceAction,
   TaskStatus,
 };

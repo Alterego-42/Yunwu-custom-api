@@ -19,6 +19,8 @@ import type {
   UserApiKeyCheckResponse,
   TaskMessage,
   TaskRecord as SharedTaskRecord,
+  TaskBatchItemRecord,
+  TaskBatchSummary,
 } from "@yunwu/shared";
 
 export type {
@@ -41,6 +43,8 @@ export type {
   UserSettingsResponse,
   UserApiKeyCheckResponse,
   TaskMessage,
+  TaskBatchItemRecord,
+  TaskBatchSummary,
 };
 
 export interface ConversationSummary {
@@ -136,7 +140,9 @@ export interface HistoryResponse {
 }
 
 export interface LibraryItemRecord {
+  kind?: "single" | "batch";
   asset: AssetRecord;
+  assets?: AssetRecord[];
   task: TaskRecord;
   conversation?: ConversationSummary;
 }

@@ -15,6 +15,7 @@ import type { TaskQueueJobData } from "./task-queue.service";
 export class TaskWorkerService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(TaskWorkerService.name);
   private worker?: Worker<TaskQueueJobData>;
+  private batchWorker?: Worker<TaskQueueJobData>;
   private connection?: IORedis;
   private readonly handleConnectionError = (error: Error) => {
     this.logger.error(`Task worker redis error: ${error.message}`);
@@ -49,10 +50,24 @@ export class TaskWorkerService implements OnModuleInit, OnModuleDestroy {
       (job) => this.process(job),
       {
         connection: this.connection,
-        concurrency: this.config.get<number>("tasks.workerConcurrency", 1),
+        concurrency: this.config.get<number>("tasks.workerConcurrency", 50),
       },
     );
-    this.logger.log(`Task worker started for queue ${queueName}.`);
+    const batchQueueName = this.config.get<string>(
+      "tasks.batchQueueName",
+      "yunwu-image-batch-tasks",
+    );
+    this.batchWorker = new Worker<TaskQueueJobData>(
+      batchQueueName,
+      (job) => this.process(job),
+      {
+        connection: this.connection,
+        concurrency: this.config.get<number>("tasks.batchWorkerConcurrency", 2),
+      },
+    );
+    this.logger.log(
+      `Task workers started for queues ${queueName} and ${batchQueueName}.`,
+    );
     this.worker.on("failed", (job, error) => {
       this.logger.error(
         `Task job ${job?.id ?? "unknown"} failed: ${error.message}`,
@@ -61,10 +76,19 @@ export class TaskWorkerService implements OnModuleInit, OnModuleDestroy {
     this.worker.on("error", (error) => {
       this.logger.error(`Task worker error: ${error.message}`);
     });
+    this.batchWorker.on("failed", (job, error) => {
+      this.logger.error(
+        `Batch task job ${job?.id ?? "unknown"} failed: ${error.message}`,
+      );
+    });
+    this.batchWorker.on("error", (error) => {
+      this.logger.error(`Batch task worker error: ${error.message}`);
+    });
   }
 
   async onModuleDestroy() {
     await this.worker?.close();
+    await this.batchWorker?.close();
     this.connection?.off("error", this.handleConnectionError);
     this.connection?.disconnect();
   }

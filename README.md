@@ -185,4 +185,6 @@ docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compo
 
 - Docker 运维交接：[docs/infra/docker-ops-handoff.md](docs/infra/docker-ops-handoff.md)
 - Windows 本地启动与测试：[docs/qa/windows-local-startup.md](docs/qa/windows-local-startup.md)
+- 桌面发布、账号与用户侧更新策略：[docs/release/desktop-release-strategy.md](docs/release/desktop-release-strategy.md)
+- v0.5.0 用户侧更新设计：[docs/release/v0.5.0-user-update-design.md](docs/release/v0.5.0-user-update-design.md)
 - v0.4.3 release notes 草案：[docs/release/v0.4.3.md](docs/release/v0.4.3.md)

@@ -5,7 +5,7 @@ import { TaskCard } from "@/components/cards/task-card";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
-import type { UiTask, UiTaskRoundNavigation } from "@/lib/api-types";
+import type { UiTask, UiTaskAsset, UiTaskRoundNavigation } from "@/lib/api-types";
 
 type TaskRoundNavigation = UiTaskRoundNavigation & {
   onPrevious?: () => void;
@@ -16,12 +16,14 @@ export function DetailPanel({
   tasks,
   queueLength,
   renderTaskActions,
+  onEditTaskAsset,
   taskRoundNavigationById,
   focusedTaskId,
 }: {
   tasks: UiTask[];
   queueLength: number;
   renderTaskActions?: (task: UiTask) => ReactNode;
+  onEditTaskAsset?: (task: UiTask, asset: UiTaskAsset) => void;
   taskRoundNavigationById?: Map<string, TaskRoundNavigation>;
   focusedTaskId?: string;
 }) {
@@ -130,6 +132,7 @@ export function DetailPanel({
               actions={renderTaskActions?.(task)}
               roundNavigation={taskRoundNavigationById?.get(task.id)}
               isFocused={focusedTaskId === task.id}
+              onEditAsset={(asset) => onEditTaskAsset?.(task, asset)}
             />
           ))}
         </div>

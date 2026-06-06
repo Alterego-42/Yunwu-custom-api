@@ -21,14 +21,30 @@ export class TaskQueueRecoveryService implements OnModuleInit {
 
     const pendingTasks = await this.prisma.task.findMany({
       where: { status: { in: ["queued", "submitted", "running"] } },
-      select: { id: true },
+      select: {
+        id: true,
+        input: true,
+        batchItems: {
+          select: { id: true },
+          take: 1,
+        },
+      },
       orderBy: { createdAt: "asc" },
     });
 
     await Promise.all(
-      pendingTasks.map((task) =>
-        this.taskQueue.enqueueTask(task.id, "worker-startup"),
-      ),
+      pendingTasks.map((task) => {
+        const input =
+          task.input && typeof task.input === "object" && !Array.isArray(task.input)
+            ? (task.input as Record<string, unknown>)
+            : {};
+        const batchCount =
+          typeof input.batchCount === "number" ? input.batchCount : 1;
+
+        return batchCount > 1 || task.batchItems.length > 0
+          ? this.taskQueue.enqueueBatchTask(task.id, "worker-startup")
+          : this.taskQueue.enqueueTask(task.id, "worker-startup");
+      }),
     );
 
     if (pendingTasks.length > 0) {

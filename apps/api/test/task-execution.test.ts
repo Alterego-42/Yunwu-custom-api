@@ -414,6 +414,388 @@ test("TaskExecutionService records concrete provider request failure details", a
   );
 });
 
+test("TaskExecutionService executes batch slots concurrently and stores partial success summary", async () => {
+  const calls = {
+    assetCreate: [] as Array<Record<string, unknown>>,
+    messageCreate: [] as Array<Record<string, unknown>>,
+    taskUpdates: [] as Array<Record<string, unknown>>,
+    taskEvents: [] as Array<Record<string, unknown>>,
+    published: [] as Array<Record<string, unknown>>,
+    storage: [] as Array<Record<string, unknown>>,
+  };
+  const batchItems = [0, 1, 2].map((batchIndex) => ({
+    id: `batch-item-${batchIndex}`,
+    taskId: "task-batch-partial",
+    batchIndex,
+    status: "queued",
+    progress: 0,
+    assetId: null as string | null,
+    errorMessage: null as string | null,
+    attempt: 0,
+    providerSummary: null as Record<string, unknown> | null,
+    output: null as Record<string, unknown> | null,
+    startedAt: null as Date | null,
+    completedAt: null as Date | null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  }));
+  const task = {
+    id: "task-batch-partial",
+    userId: "user-1",
+    conversationId: "conv-1",
+    type: "image.generate",
+    status: "queued",
+    progress: 0,
+    input: {
+      model: "gpt-image-2",
+      prompt: "Draw three lantern variations",
+      assetIds: [],
+      params: { size: "1024x1024" },
+      batchCount: 3,
+    },
+    output: null as Record<string, unknown> | null,
+    errorMessage: null as string | null,
+    conversation: { id: "conv-1" },
+    assets: [] as Array<Record<string, unknown>>,
+    batchItems,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const cloneTask = () => ({
+    ...task,
+    batchItems: batchItems.map((item) => ({ ...item })),
+  });
+  const prisma = {
+    task: {
+      findUnique: async (args?: { select?: Record<string, unknown> }) => {
+        if (args?.select?.output) {
+          return { output: task.output };
+        }
+
+        return cloneTask();
+      },
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskUpdates.push(data);
+        Object.assign(task, data);
+        return cloneTask();
+      },
+    },
+    taskBatchItem: {
+      findMany: async () => batchItems.map((item) => ({ ...item })),
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { id?: { in?: string[] } };
+        data: Record<string, unknown>;
+      }) => {
+        const ids = new Set(where.id?.in ?? []);
+        let count = 0;
+        for (const item of batchItems) {
+          if (!ids.has(item.id)) {
+            continue;
+          }
+          count += 1;
+          Object.assign(item, {
+            ...data,
+            attempt:
+              typeof (data.attempt as { increment?: number } | undefined)
+                ?.increment === "number"
+                ? item.attempt + (data.attempt as { increment: number }).increment
+                : item.attempt,
+          });
+        }
+
+        return { count };
+      },
+      update: async ({
+        where,
+        data,
+      }: {
+        where: { id: string };
+        data: Record<string, unknown>;
+      }) => {
+        const item = batchItems.find((candidate) => candidate.id === where.id);
+        if (!item) {
+          throw new Error(`Unknown batch item ${where.id}`);
+        }
+        Object.assign(item, data);
+        return { ...item };
+      },
+    },
+    asset: {
+      findMany: async () => [],
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        const asset = {
+          id: `asset-${calls.assetCreate.length + 1}`,
+          ...data,
+          createdAt: NOW,
+          updatedAt: NOW,
+        };
+        calls.assetCreate.push(asset);
+        return asset;
+      },
+    },
+    message: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.messageCreate.push(data);
+        return { id: `msg-${calls.messageCreate.length}`, ...data };
+      },
+    },
+    $queryRaw: async () => [{ providerApiKey: "sk-user-secret-123456" }],
+  };
+  let started = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let releaseAllStarted: () => void = () => undefined;
+  const allStarted = new Promise<void>((resolve) => {
+    releaseAllStarted = resolve;
+  });
+  const openaiCompatible = {
+    getBaseConfig: async () => ({ hasApiKey: false, baseUrl: "https://yunwu.ai" }),
+    createImageTask: async () => {
+      const callIndex = started;
+      started += 1;
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      if (started === batchItems.length) {
+        releaseAllStarted();
+      }
+      await allStarted;
+      inFlight -= 1;
+
+      if (callIndex === 1) {
+        throw new OpenAICompatibleRequestError("too many requests", {
+          mode: "live",
+          endpointPath: "/v1/images/generations",
+          stage: "response_status",
+          statusCode: 429,
+          errorMessage: "too many requests",
+        });
+      }
+
+      return {
+        url: `data:image/png;base64,${Buffer.from(`batch-${callIndex}`).toString("base64")}`,
+        mimeType: "image/png",
+        width: 1024,
+        height: 1024,
+        responseSummary: { mode: "live", callIndex },
+        mocked: false,
+      };
+    },
+  };
+  const service = new TaskExecutionService(
+    prisma as never,
+    openaiCompatible as never,
+    { persistTestFinished: async () => undefined, getState: async () => null } as never,
+    { refreshAlerts: async <T>(value: T) => value } as never,
+    {
+      publishTaskUpdated: (payload: Record<string, unknown>) => {
+        calls.published.push(payload);
+      },
+    } as never,
+    {
+      record: async (payload: Record<string, unknown>) => {
+        calls.taskEvents.push(payload);
+      },
+    } as never,
+    createAssetStorageMock({ store: calls.storage }) as never,
+  );
+
+  await service.execute(task.id);
+
+  assert.equal(started, 3);
+  assert.equal(maxInFlight, 3);
+  assert.equal(calls.assetCreate.length, 2);
+  assert.deepEqual(
+    batchItems.map((item) => item.status),
+    ["succeeded", "failed", "succeeded"],
+  );
+  assert.deepEqual(
+    batchItems.map((item) => item.assetId),
+    ["asset-1", null, "asset-2"],
+  );
+
+  const finalUpdate = calls.taskUpdates
+    .slice()
+    .reverse()
+    .find((update: Record<string, unknown>) => update.status === "succeeded");
+  const output = finalUpdate?.output as Record<string, unknown>;
+  assert.equal(finalUpdate?.progress, 100);
+  assert.equal(output.batchSize, 3);
+  assert.equal(output.returnedCount, 3);
+  assert.equal(output.successCount, 2);
+  assert.equal(output.failedCount, 1);
+  assert.equal(output.partialSuccess, true);
+  assert.deepEqual(output.assetIds, ["asset-1", "asset-2"]);
+  assert.equal(
+    output.firstFailureMessage,
+    "The image provider is rate limited. Please retry later.",
+  );
+  assert.equal(calls.messageCreate.at(-1)?.content, "Batch image task completed.");
+  assert.equal(calls.published.at(-1)?.status, "succeeded");
+});
+
+test("TaskExecutionService marks batch slots failed when shared batch setup fails", async () => {
+  const calls = {
+    messageCreate: [] as Array<Record<string, unknown>>,
+    taskUpdates: [] as Array<Record<string, unknown>>,
+    taskEvents: [] as Array<Record<string, unknown>>,
+    published: [] as Array<Record<string, unknown>>,
+  };
+  const batchItems = [0, 1].map((batchIndex) => ({
+    id: `batch-setup-item-${batchIndex}`,
+    taskId: "task-batch-setup-failure",
+    batchIndex,
+    status: "queued",
+    progress: 0,
+    assetId: null as string | null,
+    errorMessage: null as string | null,
+    attempt: 0,
+    providerSummary: null as Record<string, unknown> | null,
+    output: null as Record<string, unknown> | null,
+    startedAt: null as Date | null,
+    completedAt: null as Date | null,
+    createdAt: NOW,
+    updatedAt: NOW,
+  }));
+  const task = {
+    id: "task-batch-setup-failure",
+    userId: "user-1",
+    conversationId: "conv-1",
+    type: "image.generate",
+    status: "queued",
+    progress: 0,
+    input: {
+      model: "gpt-image-2",
+      prompt: "Draw two setup failure variations",
+      assetIds: [],
+      params: { size: "1024x1024" },
+      batchCount: 2,
+    },
+    output: null as Record<string, unknown> | null,
+    errorMessage: null as string | null,
+    conversation: { id: "conv-1" },
+    assets: [] as Array<Record<string, unknown>>,
+    batchItems,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+  const cloneTask = () => ({
+    ...task,
+    batchItems: batchItems.map((item) => ({ ...item })),
+  });
+  const prisma = {
+    task: {
+      findUnique: async () => cloneTask(),
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskUpdates.push(data);
+        Object.assign(task, data);
+        return cloneTask();
+      },
+    },
+    taskBatchItem: {
+      findMany: async () => batchItems.map((item) => ({ ...item })),
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: {
+          id?: { in?: string[] };
+          status?: { in?: string[] };
+        };
+        data: Record<string, unknown>;
+      }) => {
+        const ids = new Set(where.id?.in ?? []);
+        const statuses = new Set(where.status?.in ?? []);
+        let count = 0;
+
+        for (const item of batchItems) {
+          if (ids.size > 0 && !ids.has(item.id)) {
+            continue;
+          }
+          if (statuses.size > 0 && !statuses.has(item.status)) {
+            continue;
+          }
+
+          count += 1;
+          Object.assign(item, {
+            ...data,
+            attempt:
+              typeof (data.attempt as { increment?: number } | undefined)
+                ?.increment === "number"
+                ? item.attempt + (data.attempt as { increment: number }).increment
+                : item.attempt,
+          });
+        }
+
+        return { count };
+      },
+    },
+    asset: {
+      findMany: async () => [],
+    },
+    message: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.messageCreate.push(data);
+        return { id: `msg-${calls.messageCreate.length}`, ...data };
+      },
+    },
+    $queryRaw: async () => [{ providerApiKey: "sk-user-secret-123456" }],
+  };
+  let createImageCalls = 0;
+  const openaiCompatible = {
+    getBaseConfig: async () => {
+      throw new Error("Provider setup exploded.");
+    },
+    createImageTask: async () => {
+      createImageCalls += 1;
+      throw new Error("Should not create slot requests.");
+    },
+  };
+  const service = new TaskExecutionService(
+    prisma as never,
+    openaiCompatible as never,
+    { persistTestFinished: async () => undefined, getState: async () => null } as never,
+    { refreshAlerts: async <T>(value: T) => value } as never,
+    {
+      publishTaskUpdated: (payload: Record<string, unknown>) => {
+        calls.published.push(payload);
+      },
+    } as never,
+    {
+      record: async (payload: Record<string, unknown>) => {
+        calls.taskEvents.push(payload);
+      },
+    } as never,
+    createAssetStorageMock() as never,
+  );
+
+  await service.execute(task.id);
+
+  assert.equal(createImageCalls, 0);
+  assert.deepEqual(
+    batchItems.map((item) => item.status),
+    ["failed", "failed"],
+  );
+  assert.deepEqual(
+    batchItems.map((item) => item.errorMessage),
+    ["Provider setup exploded.", "Provider setup exploded."],
+  );
+
+  const finalUpdate = calls.taskUpdates.at(-1);
+  const output = finalUpdate?.output as Record<string, unknown>;
+  assert.equal(finalUpdate?.status, "failed");
+  assert.equal(finalUpdate?.errorMessage, "Provider setup exploded.");
+  assert.equal(output.batchSize, 2);
+  assert.equal(output.returnedCount, 2);
+  assert.equal(output.successCount, 0);
+  assert.equal(output.failedCount, 2);
+  assert.equal(output.firstFailureMessage, "Provider setup exploded.");
+  assert.equal(calls.messageCreate.at(-1)?.content, "Provider setup exploded.");
+  assert.equal(calls.published.at(-1)?.status, "failed");
+});
+
 test("TaskExecutionService classifies provider status and payload failures", async () => {
   const cases = [
     {

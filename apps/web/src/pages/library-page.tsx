@@ -97,6 +97,9 @@ export function LibraryPage() {
             key={item.asset.id}
             item={item}
             deleting={deletingSet.has(item.asset.id)}
+            onEditAsset={(asset) =>
+              navigate(`/create?fromTaskId=${item.task.id}&assetId=${asset.id}&mode=edit`)
+            }
             actions={
               <>
                 {item.conversation?.id ? (
@@ -104,12 +107,20 @@ export function LibraryPage() {
                     查看来源
                   </Button>
                 ) : null}
-                <Button size="sm" variant="ghost" onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=edit`)}>
-                  继续创作
-                </Button>
-                <Button size="sm" onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=variant&fork=1`)}>
-                  Fork
-                </Button>
+                {item.task.batch?.isBatch ? null : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=edit`)}
+                  >
+                    继续创作
+                  </Button>
+                )}
+                {item.task.batch?.isBatch ? null : (
+                  <Button size="sm" onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=variant&fork=1`)}>
+                    Fork
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"

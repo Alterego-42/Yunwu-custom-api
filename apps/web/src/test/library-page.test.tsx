@@ -120,4 +120,33 @@ describe("library page", () => {
     expect(screen.queryByText("failed provider output")).toBeNull();
     expect(screen.getAllByText("下载")).toHaveLength(1);
   });
+
+  it("requires opening the batch modal instead of direct batch re-edit", async () => {
+    renderLibraryPage({
+      items: [
+        createLibraryItem({
+          kind: "batch",
+          assets: [
+            createAsset({ id: "asset_batch_1" }),
+            createAsset({ id: "asset_batch_2" }),
+          ],
+          task: createTask({
+            batch: {
+              isBatch: true,
+              batchSize: 2,
+              returnedCount: 2,
+              successCount: 2,
+              failedCount: 0,
+              loadingCount: 0,
+            },
+          }),
+        }),
+      ],
+    });
+
+    expect(await screen.findByText("批量 x2")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "打开批量结果" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "继续创作" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Fork" })).toBeNull();
+  });
 });

@@ -8,6 +8,7 @@ import type {
   TaskRecord,
   TaskSourceAction,
   TaskStatus,
+  UiBatchSlot,
   UiImageResult,
   UiTask,
   UiTaskAsset,
@@ -158,6 +159,18 @@ export function isTaskActive(task: Pick<TaskRecord, "status">) {
   return ACTIVE_TASK_STATUSES.has(task.status);
 }
 
+export function isBatchTask(task: Pick<TaskRecord, "batch" | "batchItems">) {
+  return Boolean(task.batch?.isBatch || task.batchItems?.length);
+}
+
+export function getBatchStatusLabel(task: Pick<TaskRecord, "status" | "batch">) {
+  if (task.batch?.partialSuccess) {
+    return "部分完成";
+  }
+
+  return getTaskStatusLabel(task.status);
+}
+
 export function getTaskProgress(task: TaskRecord) {
   if (typeof task.progress === "number") {
     return Math.min(100, Math.max(0, Math.round(task.progress)));
@@ -258,6 +271,62 @@ function createTaskPlaceholderAsset(task: TaskRecord, assetId: string): AssetRec
   };
 }
 
+function toEmbeddedOutputAsset(task: TaskRecord, value: unknown): AssetRecord | null {
+  const record = asRecord(value);
+  const id = typeof record.id === "string" ? record.id : undefined;
+
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    taskId: task.id,
+    type: "generated",
+    url: typeof record.url === "string" ? record.url : "",
+    storageKey: typeof record.storageKey === "string" ? record.storageKey : undefined,
+    mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined,
+    width: typeof record.width === "number" ? record.width : undefined,
+    height: typeof record.height === "number" ? record.height : undefined,
+    batchIndex: typeof record.batchIndex === "number" ? record.batchIndex : undefined,
+    batchItemId: typeof record.batchItemId === "string" ? record.batchItemId : undefined,
+    createdAt: task.updatedAt ?? task.createdAt ?? new Date().toISOString(),
+  };
+}
+
+export function getTaskEmbeddedOutputAssets(task: TaskRecord): AssetRecord[] {
+  const embeddedAssets = task.outputSummary?.assets;
+
+  if (!Array.isArray(embeddedAssets)) {
+    return [];
+  }
+
+  return embeddedAssets
+    .map((item) => toEmbeddedOutputAsset(task, item))
+    .filter((asset): asset is AssetRecord => Boolean(asset));
+}
+
+export function getTaskKnownAssets(task: TaskRecord, assets: AssetRecord[] = []) {
+  const assetsById = new Map<string, AssetRecord>();
+
+  getTaskEmbeddedOutputAssets(task).forEach((asset) => {
+    assetsById.set(asset.id, asset);
+  });
+  assets.forEach((asset) => {
+    assetsById.set(asset.id, asset);
+  });
+
+  return [...assetsById.values()];
+}
+
+export function getTaskKnownAssetById(
+  task: TaskRecord,
+  assetId: string,
+  assets: AssetRecord[] = [],
+) {
+  return getTaskKnownAssets(task, assets).find((asset) => asset.id === assetId);
+}
+
 export function getTaskComposerAssetIds(task: TaskRecord) {
   if (task.failure?.category === "invalid_request") {
     return getTaskInputAssetIds(task);
@@ -268,7 +337,8 @@ export function getTaskComposerAssetIds(task: TaskRecord) {
 }
 
 export function getTaskComposerAssets(task: TaskRecord, assets: AssetRecord[]) {
-  const assetsById = new Map(assets.map((asset) => [asset.id, asset]));
+  const knownAssets = getTaskKnownAssets(task, assets);
+  const assetsById = new Map(knownAssets.map((asset) => [asset.id, asset]));
 
   return getTaskComposerAssetIds(task).map((assetId) => {
     return assetsById.get(assetId) ?? createTaskPlaceholderAsset(task, assetId);
@@ -504,18 +574,40 @@ export function toUiTaskAsset(asset: AssetRecord): UiTaskAsset {
 }
 
 export function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
+  const knownAssets = getTaskKnownAssets(task, assets);
   const inputAssetIds = new Set(getTaskInputAssetIds(task));
   const outputAssetIds = new Set(getTaskOutputAssetIds(task));
-  const inputAssets = assets
+  const assetsById = new Map(knownAssets.map((asset) => [asset.id, asset]));
+  const inputAssets = knownAssets
     .filter((asset) => inputAssetIds.has(asset.id))
     .map(toUiTaskAsset);
   const resultAssets = isTaskRealSucceeded(task)
-    ? assets
+    ? knownAssets
         .filter((asset) => outputAssetIds.has(asset.id) || asset.taskId === task.id)
         .filter((asset) => asset.type === "generated")
         .filter((asset) => !hasMockedMarker(asset))
         .map(toUiTaskAsset)
     : [];
+  const batchSlots: UiBatchSlot[] | undefined = task.batchItems?.map((item) => {
+    const asset = item.assetId
+      ? assetsById.get(item.assetId)
+      : knownAssets.find(
+          (candidate) =>
+            candidate.batchItemId === item.id ||
+            candidate.batchIndex === item.batchIndex,
+        );
+
+    return {
+      id: item.id,
+      taskId: item.taskId,
+      batchIndex: item.batchIndex,
+      status: item.status,
+      progress: item.progress,
+      asset: asset ? toUiTaskAsset(asset) : undefined,
+      errorMessage: item.errorMessage,
+      attempt: item.attempt,
+    };
+  });
 
   return {
     id: task.id,
@@ -524,7 +616,11 @@ export function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
     progress: getTaskProgress(task),
     status: task.status,
     eta: getTaskRuntimeLabel(task),
-    tags: [task.capability, task.modelId].filter(Boolean),
+    tags: [
+      task.capability,
+      task.modelId,
+      task.batch?.isBatch ? `批量 x${task.batch.batchSize}` : undefined,
+    ].filter((tag): tag is string => Boolean(tag)),
     capability: task.capability,
     model: task.modelId,
     createdAt: task.createdAt,
@@ -543,6 +639,8 @@ export function toUiTask(task: TaskRecord, assets: AssetRecord[]): UiTask {
     sourceAction: task.sourceAction,
     inputSummary: task.inputSummary,
     outputSummary: task.outputSummary,
+    batch: task.batch,
+    batchSlots,
   };
 }
 
@@ -619,6 +717,8 @@ export function buildTaskRoundNavigation(tasks: TaskRecord[]) {
 }
 
 export function toImageResults(tasks: TaskRecord[], assets: AssetRecord[]): UiImageResult[] {
+  const emittedBatchTaskIds = new Set<string>();
+
   return assets
     .filter((asset) => asset.type === "generated")
     .filter((asset) => !hasMockedMarker(asset))
@@ -627,6 +727,14 @@ export function toImageResults(tasks: TaskRecord[], assets: AssetRecord[]): UiIm
 
       if (task && !isTaskRealSucceeded(task)) {
         return [];
+      }
+
+      if (task && isBatchTask(task)) {
+        if (emittedBatchTaskIds.has(task.id)) {
+          return [];
+        }
+
+        emittedBatchTaskIds.add(task.id);
       }
 
       return [
@@ -638,7 +746,10 @@ export function toImageResults(tasks: TaskRecord[], assets: AssetRecord[]): UiIm
               ? `${asset.width} × ${asset.height}`
               : asset.mimeType ?? "未知尺寸",
           model: task?.modelId ?? "unknown",
-          badge: `结果 ${index + 1}`,
+          badge:
+            task?.batch?.isBatch
+              ? `批量 ${task.batch.successCount}/${task.batch.batchSize}`
+              : `结果 ${index + 1}`,
           url: resolveAssetUrl(asset.url, asset.storageKey),
           storageKey: asset.storageKey,
         },

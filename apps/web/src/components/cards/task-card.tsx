@@ -15,10 +15,11 @@ import {
   XCircle,
 } from "lucide-react";
 
+import { BatchResultModal } from "@/components/cards/batch-result-modal";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { getSourceActionLabel, resolveAssetUrl } from "@/lib/api-mappers";
-import type { UiTask, UiTaskRoundNavigation } from "@/lib/api-types";
+import type { UiTask, UiTaskAsset, UiTaskRoundNavigation } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
 
 type TaskRoundNavigation = UiTaskRoundNavigation & {
@@ -267,147 +268,264 @@ export function TaskCard({
   actions,
   roundNavigation,
   isFocused = false,
+  onEditAsset,
 }: {
   task: UiTask;
   compact?: boolean;
   actions?: ReactNode;
   roundNavigation?: TaskRoundNavigation;
   isFocused?: boolean;
+  onEditAsset?: (asset: UiTaskAsset) => void;
 }) {
   const isActive = task.status === "queued" || task.status === "submitted" || task.status === "running";
   const hasResults = Boolean(task.resultAssets?.length);
   const hasInputs = Boolean(task.inputAssets?.length);
+  const isBatch = Boolean(task.batch?.isBatch);
+  const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
+  const orderedBatchSlots = (task.batchSlots ?? [])
+    .slice()
+    .sort((left, right) => left.batchIndex - right.batchIndex);
+  const batchStats = task.batch
+    ? [
+        `共 ${task.batch.batchSize} 个`,
+        `已返回 ${task.batch.returnedCount}`,
+        `成功 ${task.batch.successCount}`,
+        `处理中 ${task.batch.loadingCount}`,
+        `失败 ${task.batch.failedCount}`,
+      ]
+    : [];
 
   return (
-    <Card
-      className={cn(
-        "transition-shadow",
-        isFocused ? "ring-1 ring-primary/60 shadow-lg shadow-primary/10" : null,
-      )}
-    >
-      <CardHeader className={compact ? "pb-3" : "pb-4"}>
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2 text-xs text-muted-foreground">
-              <TaskStatusIcon status={task.status} />
-              <span>{task.capability ?? "任务"}</span>
+    <>
+      <Card
+        className={cn(
+          "transition-shadow",
+          isFocused ? "ring-1 ring-primary/60 shadow-lg shadow-primary/10" : null,
+        )}
+      >
+        <CardHeader className={compact ? "pb-3" : "pb-4"}>
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                <TaskStatusIcon status={task.status} />
+                <span>{task.capability ?? "任务"}</span>
+              </div>
+              <CardTitle className="mt-2 line-clamp-2 text-base">{task.title}</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">{task.id}</p>
             </div>
-            <CardTitle className="mt-2 line-clamp-2 text-base">{task.title}</CardTitle>
-            <p className="mt-1 text-xs text-muted-foreground">{task.id}</p>
+            <Badge variant="outline" className={statusToneMap[task.status]}>
+              {task.batch?.partialSuccess ? "部分完成" : statusLabel[task.status]}
+            </Badge>
           </div>
-          <Badge variant="outline" className={statusToneMap[task.status]}>
-            {statusLabel[task.status]}
-          </Badge>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {task.summary ? (
-          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-foreground">
-            {task.summary}
-          </div>
-        ) : null}
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {task.summary ? (
+            <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-foreground">
+              {task.summary}
+            </div>
+          ) : null}
 
-        {task.errorMessage ? (
-          <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-            失败原因：{task.errorMessage}
-          </div>
-        ) : null}
+          {task.errorMessage ? (
+            <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+              失败原因：{task.errorMessage}
+            </div>
+          ) : null}
 
-        {task.failure ? (
-          <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-muted-foreground">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="font-medium text-foreground">
-                {task.failure.title ?? "失败恢复"}
-              </span>
-              <Badge variant="outline">{task.failure.category}</Badge>
-              <Badge
-                variant="outline"
-                className={
-                  task.failure.retryable
-                    ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
-                    : "border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] text-muted-foreground"
-                }
-              >
-                {task.failure.retryable ? "可重试" : "需调整参数"}
+          {task.batch ? (
+            <div className="space-y-2">
+              <div className="flex flex-wrap gap-2">
+                {batchStats.map((item) => (
+                  <Badge key={item} variant="outline">
+                    {item}
+                  </Badge>
+                ))}
+              </div>
+              {task.batch.firstFailureMessage ? (
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                  首个失败：{task.batch.firstFailureMessage}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {task.failure ? (
+            <div className="rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-2 text-sm text-muted-foreground">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-foreground">
+                  {task.failure.title ?? "失败恢复"}
+                </span>
+                <Badge variant="outline">{task.failure.category}</Badge>
+                <Badge
+                  variant="outline"
+                  className={
+                    task.failure.retryable
+                      ? "border-emerald-400/30 bg-emerald-400/10 text-emerald-100"
+                      : "border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-high)/0.8)] text-muted-foreground"
+                  }
+                >
+                  {task.failure.retryable ? "可重试" : "需调整参数"}
+                </Badge>
+              </div>
+              {task.failure.detail ? <p className="mt-2">{task.failure.detail}</p> : null}
+            </div>
+          ) : null}
+
+          <div className="flex flex-wrap gap-2">
+            {task.tags.map((tag) => (
+              <Badge key={tag} variant="outline">
+                {tag}
               </Badge>
-            </div>
-            {task.failure.detail ? <p className="mt-2">{task.failure.detail}</p> : null}
+            ))}
+            {task.sourceAction ? (
+              <Badge variant="outline">{getSourceActionLabel(task.sourceAction)}</Badge>
+            ) : null}
+            {task.sourceTaskId ? (
+              <Badge variant="outline" className="max-w-full truncate">
+                来源 {task.sourceTaskId}
+              </Badge>
+            ) : null}
           </div>
-        ) : null}
 
-        <div className="flex flex-wrap gap-2">
-          {task.tags.map((tag) => (
-            <Badge key={tag} variant="outline">
-              {tag}
-            </Badge>
-          ))}
-          {task.sourceAction ? (
-            <Badge variant="outline">{getSourceActionLabel(task.sourceAction)}</Badge>
-          ) : null}
-          {task.sourceTaskId ? (
-            <Badge variant="outline" className="max-w-full truncate">
-              来源 {task.sourceTaskId}
-            </Badge>
-          ) : null}
-        </div>
-
-        {!compact && hasResults ? (
-          <div className="space-y-3">
-            <div className="text-xs font-medium text-muted-foreground">结果素材</div>
-            <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
-              {task.resultAssets?.map((asset) => <TaskAssetPreview key={asset.id} asset={asset} />)}
-            </div>
-          </div>
-        ) : null}
-
-        {compact && hasResults ? (
-          <div className="text-xs text-muted-foreground">结果素材 {task.resultAssets?.length} 项</div>
-        ) : null}
-
-        {!compact && hasInputs ? (
-          <div className="space-y-2">
-            <div className="text-xs font-medium text-muted-foreground">参考素材</div>
-            <div className="flex flex-wrap gap-2">
-              {task.inputAssets?.map((asset) => {
-                const assetUrl = resolveAssetUrl(asset.url, asset.storageKey);
-
-                return assetUrl ? (
-                  <TaskInputAssetPreview
-                    key={asset.id}
-                    asset={asset}
-                    assetUrl={assetUrl}
-                  />
-                ) : (
-                  <div
-                    key={asset.id}
-                    className="inline-flex items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-1 text-xs text-muted-foreground"
+          {!compact && isBatch && orderedBatchSlots.length > 0 ? (
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-xs font-medium text-muted-foreground">批量槽位</div>
+                {task.batch?.successCount ? (
+                  <button
+                    type="button"
+                    className="text-xs text-primary hover:underline"
+                    onClick={() => setIsBatchModalOpen(true)}
                   >
-                    <ImageIcon className="h-3.5 w-3.5" />
-                    <span>{asset.label}</span>
-                  </div>
-                );
-              })}
+                    查看批量结果
+                  </button>
+                ) : null}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                {orderedBatchSlots.map((slot) => {
+                  if (slot.status === "succeeded" && slot.asset) {
+                    return <TaskAssetPreview key={slot.id} asset={slot.asset} />;
+                  }
+
+                  if (slot.status === "succeeded") {
+                    return (
+                      <div
+                        key={slot.id}
+                        className="overflow-hidden rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)]"
+                      >
+                        <div className="flex aspect-[4/3] items-center justify-center border-b border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))]">
+                          <ImageIcon className="h-5 w-5 text-muted-foreground" />
+                        </div>
+                        <div className="space-y-1 p-3 text-xs">
+                          <p className="font-medium text-foreground">#{slot.batchIndex + 1}</p>
+                          <p className="text-muted-foreground">图片待加载</p>
+                        </div>
+                      </div>
+                    );
+                  }
+
+                  const isSlotActive = slot.status === "queued" || slot.status === "submitted" || slot.status === "running";
+                  return (
+                    <div
+                      key={slot.id}
+                      className="overflow-hidden rounded-xl border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)]"
+                    >
+                      <div className="flex aspect-[4/3] items-center justify-center border-b border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))]">
+                        {isSlotActive ? (
+                          <LoaderCircle className="h-5 w-5 animate-spin text-muted-foreground" />
+                        ) : (
+                          <XCircle className="h-5 w-5 text-destructive" />
+                        )}
+                      </div>
+                      <div className="space-y-1 p-3 text-xs">
+                        <p className="font-medium text-foreground">#{slot.batchIndex + 1}</p>
+                        <p className={isSlotActive ? "text-muted-foreground" : "text-destructive"}>
+                          {isSlotActive ? "处理中" : slot.errorMessage ?? "失败"}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
+          ) : null}
+
+          {!compact && hasResults && !isBatch ? (
+            <div className="space-y-3">
+              <div className="text-xs font-medium text-muted-foreground">结果素材</div>
+              <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                {task.resultAssets?.map((asset) => <TaskAssetPreview key={asset.id} asset={asset} />)}
+              </div>
+            </div>
+          ) : null}
+
+          {compact && hasResults && !isBatch ? (
+            <div className="text-xs text-muted-foreground">结果素材 {task.resultAssets?.length} 项</div>
+          ) : null}
+
+          {compact && isBatch ? (
+            <div className="text-xs text-muted-foreground">
+              批量 {task.batch?.successCount ?? 0} 成功 / {task.batch?.failedCount ?? 0} 失败
+            </div>
+          ) : null}
+
+          {!compact && hasInputs ? (
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-muted-foreground">参考素材</div>
+              <div className="flex flex-wrap gap-2">
+                {task.inputAssets?.map((asset) => {
+                  const assetUrl = resolveAssetUrl(asset.url, asset.storageKey);
+
+                  return assetUrl ? (
+                    <TaskInputAssetPreview
+                      key={asset.id}
+                      asset={asset}
+                      assetUrl={assetUrl}
+                    />
+                  ) : (
+                    <div
+                      key={asset.id}
+                      className="inline-flex items-center gap-2 rounded-full border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] px-3 py-1 text-xs text-muted-foreground"
+                    >
+                      <ImageIcon className="h-3.5 w-3.5" />
+                      <span>{asset.label}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : null}
+
+          {compact && hasInputs ? (
+            <div className="text-xs text-muted-foreground">参考素材 {task.inputAssets?.length} 项</div>
+          ) : null}
+
+          {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
+
+          <TaskRoundSwitcher navigation={roundNavigation} />
+
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {isActive ? (
+              <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <Clock3 className="h-3.5 w-3.5" />
+            )}
+            <span>{task.eta}</span>
           </div>
-        ) : null}
-
-        {compact && hasInputs ? (
-          <div className="text-xs text-muted-foreground">参考素材 {task.inputAssets?.length} 项</div>
-        ) : null}
-
-        {actions ? <div className="flex flex-wrap gap-2">{actions}</div> : null}
-
-        <TaskRoundSwitcher navigation={roundNavigation} />
-
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {isActive ? (
-            <LoaderCircle className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Clock3 className="h-3.5 w-3.5" />
-          )}
-          <span>{task.eta}</span>
-        </div>
-      </CardContent>
-    </Card>
+        </CardContent>
+      </Card>
+      <BatchResultModal
+        task={task}
+        open={isBatchModalOpen}
+        onClose={() => setIsBatchModalOpen(false)}
+        onEditAsset={
+          onEditAsset
+            ? (asset) => {
+                setIsBatchModalOpen(false);
+                onEditAsset(asset);
+              }
+            : undefined
+        }
+      />
+    </>
   );
 }

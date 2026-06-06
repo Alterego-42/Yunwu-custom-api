@@ -126,8 +126,10 @@ docker compose --env-file ..\.env down -v
 - `REDIS_URL=redis://localhost:6379`
 - `TASK_QUEUE_ENABLED=true`
 - `TASK_QUEUE_NAME=yunwu-image-tasks`
+- `TASK_BATCH_QUEUE_NAME=yunwu-image-batch-tasks`
 - `TASK_WORKER_ENABLED=true`
-- `TASK_WORKER_CONCURRENCY=2`
+- `TASK_WORKER_CONCURRENCY=50`
+- `TASK_BATCH_WORKER_CONCURRENCY=2`
 
 本地 MinIO 联调：
 
@@ -193,8 +195,9 @@ curl.exe http://localhost:9000/minio/health/live
 
 Redis 是 API / Worker 拆分后的队列中枢：
 
-- API 进程：创建任务后向 `TASK_QUEUE_NAME` 入队
-- Worker 进程：从同一 `TASK_QUEUE_NAME` 消费任务
+- API 进程：创建普通任务后向 `TASK_QUEUE_NAME` 入队，创建批量任务后向 `TASK_BATCH_QUEUE_NAME` 入队
+- Worker 进程：从 `TASK_QUEUE_NAME` 消费普通任务，从 `TASK_BATCH_QUEUE_NAME` 消费批量任务
+- 普通任务默认 worker 并发为 `50`，批量父任务默认 worker 并发为 `2`
 - 队列名不一致会导致 API 已入队但 Worker 永远消费不到
 
 提交图片任务后检查队列 key：
@@ -205,6 +208,10 @@ docker exec yunwu-redis redis-cli llen "bull:yunwu-image-tasks:wait"
 docker exec yunwu-redis redis-cli llen "bull:yunwu-image-tasks:active"
 docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-tasks:completed"
 docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-tasks:failed"
+docker exec yunwu-redis redis-cli llen "bull:yunwu-image-batch-tasks:wait"
+docker exec yunwu-redis redis-cli llen "bull:yunwu-image-batch-tasks:active"
+docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-batch-tasks:completed"
+docker exec yunwu-redis redis-cli zcard "bull:yunwu-image-batch-tasks:failed"
 ```
 
 常见判断：
@@ -283,7 +290,7 @@ docker logs yunwu-minio-init --tail 100
 
 - PostgreSQL unhealthy：检查 `POSTGRES_*` 是否改过、端口 `5432` 是否被占用；必要时 `docker compose --env-file ..\.env down -v` 清理重建
 - Prisma migration 失败：先跑 PostgreSQL 健康检查，再确认根目录 `.env` 中的 `DATABASE_URL` 与 compose 凭据一致
-- Redis `PONG` 正常但任务不消费：确认 API / Worker 的 `TASK_QUEUE_NAME` 完全一致，并确认 Worker 进程已启动
+- Redis `PONG` 正常但任务不消费：确认 API / Worker 的 `TASK_QUEUE_NAME` 和 `TASK_BATCH_QUEUE_NAME` 完全一致，并确认 Worker 进程已启动
 - BullMQ `wait` 不断增长：Worker 未启动、Worker 连接的是其他 Redis，或 Worker 进程报错退出
 - BullMQ `failed` 增长：查看 Worker 日志，重点检查上游 `YUNWU_API_KEY`、对象存储、数据库写入错误
 - MinIO health 失败：查看 `yunwu-minio` 日志，确认 `MINIO_PORT` 未冲突且 root 用户名密码长度满足 MinIO 要求

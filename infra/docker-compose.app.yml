@@ -24,9 +24,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yunwu_platform}?schema=public
       REDIS_URL: redis://redis:6379
       TASK_QUEUE_NAME: ${TASK_QUEUE_NAME:-yunwu-image-tasks}
+      TASK_BATCH_QUEUE_NAME: ${TASK_BATCH_QUEUE_NAME:-yunwu-image-batch-tasks}
       TASK_QUEUE_ENABLED: "true"
       TASK_WORKER_ENABLED: "false"
-      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-2}
+      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-50}
+      TASK_BATCH_WORKER_CONCURRENCY: ${TASK_BATCH_WORKER_CONCURRENCY:-2}
       STORAGE_MODE: minio
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000
@@ -76,9 +78,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-yunwu_platform}?schema=public
       REDIS_URL: redis://redis:6379
       TASK_QUEUE_NAME: ${TASK_QUEUE_NAME:-yunwu-image-tasks}
+      TASK_BATCH_QUEUE_NAME: ${TASK_BATCH_QUEUE_NAME:-yunwu-image-batch-tasks}
       TASK_QUEUE_ENABLED: "true"
       TASK_WORKER_ENABLED: "true"
-      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-2}
+      TASK_WORKER_CONCURRENCY: ${TASK_WORKER_CONCURRENCY:-50}
+      TASK_BATCH_WORKER_CONCURRENCY: ${TASK_BATCH_WORKER_CONCURRENCY:-2}
       STORAGE_MODE: minio
       MINIO_ENDPOINT: minio
       MINIO_PORT: 9000

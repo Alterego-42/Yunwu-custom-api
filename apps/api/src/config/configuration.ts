@@ -27,6 +27,8 @@ export const configuration = () => ({
   redisUrl: process.env.REDIS_URL,
   tasks: {
     queueName: process.env.TASK_QUEUE_NAME ?? "yunwu-image-tasks",
+    batchQueueName:
+      process.env.TASK_BATCH_QUEUE_NAME ?? "yunwu-image-batch-tasks",
     eventsChannel: process.env.TASK_EVENTS_CHANNEL ?? "yunwu-image-task-events",
     workerEnabled:
       (process.env.TASK_WORKER_ENABLED ??
@@ -35,7 +37,10 @@ export const configuration = () => ({
     workerConcurrency: Number(
       process.env.TASK_WORKER_CONCURRENCY ??
         process.env.TASK_QUEUE_CONCURRENCY ??
-        1,
+        50,
+    ),
+    batchWorkerConcurrency: Number(
+      process.env.TASK_BATCH_WORKER_CONCURRENCY ?? 2,
     ),
   },
   cors: {

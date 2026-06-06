@@ -37,39 +37,41 @@ function RecoveryTaskCompactCard({
 }) {
   return (
     <div
-      className="rounded-xl border border-destructive/25 bg-destructive/[0.07] p-3"
+      className="space-y-3 rounded-xl border border-destructive/25 bg-destructive/[0.07] p-3.5"
       data-testid="compact-recovery-card"
     >
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="truncate text-sm font-medium text-foreground">{task.prompt || task.id}</p>
+      <div className="min-w-0 space-y-2">
+        <div className="flex flex-wrap items-start gap-2">
+          <p className="min-w-0 flex-1 basis-64 line-clamp-2 text-sm font-medium leading-6 text-foreground">
+            {task.prompt || task.id}
+          </p>
+          <div className="flex shrink-0 flex-wrap gap-2">
             <Badge variant="outline" className="border-destructive/30 text-destructive">
               失败
             </Badge>
             <Badge variant="outline">{task.modelId}</Badge>
           </div>
-          <p className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-            {task.failure?.title ?? task.errorMessage ?? "任务执行失败，可在工作台查看上下文。"}
-          </p>
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          {task.canRetry ? (
-            <Button size="sm" onClick={() => onRetry(task)}>
-              一键重试
-            </Button>
-          ) : null}
-          {task.conversationId ? (
-            <Button size="sm" variant="outline" onClick={() => onOpenWorkspace(task)}>
-              打开工作台
-            </Button>
-          ) : null}
-          <Button size="sm" variant="ghost" onClick={() => onIgnore(task.id)}>
-            忽略
-          </Button>
-        </div>
+        <p className="line-clamp-2 text-xs leading-5 text-muted-foreground">
+          {task.failure?.title ?? task.errorMessage ?? "任务执行失败，可在工作台查看上下文。"}
+        </p>
       </div>
-      <details className="mt-2 text-xs text-muted-foreground">
+      <div className="flex flex-wrap items-center gap-2 border-t border-destructive/15 pt-3">
+        {task.canRetry && !task.batch?.isBatch ? (
+          <Button size="sm" onClick={() => onRetry(task)}>
+            一键重试
+          </Button>
+        ) : null}
+        {task.conversationId ? (
+          <Button size="sm" variant="outline" onClick={() => onOpenWorkspace(task)}>
+            打开工作台
+          </Button>
+        ) : null}
+        <Button size="sm" variant="ghost" onClick={() => onIgnore(task.id)}>
+          忽略
+        </Button>
+      </div>
+      <details className="text-xs text-muted-foreground">
         <summary className="cursor-pointer select-none">失败详情 / 调整入口</summary>
         <div className="mt-2 rounded-lg border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-low)/0.82)] p-2">
           <p>{task.failure?.detail ?? task.errorMessage ?? "暂无更多失败详情。"}</p>
@@ -201,7 +203,7 @@ export function HomePage() {
         </Card>
       ) : null}
 
-      <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+      <div className="grid items-start gap-6 lg:grid-cols-2">
         <Card>
           <CardHeader>
             <CardTitle>最近会话</CardTitle>
@@ -225,14 +227,14 @@ export function HomePage() {
                 onClick={() => navigate(`/workspace/${conversation.id}`)}
                 className="w-full rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container)/0.9)] p-4 text-left transition hover:bg-[hsl(var(--surface-container-high)/0.94)]"
               >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <p className="font-medium text-foreground">{conversation.title}</p>
-                    <p className="mt-2 text-sm text-muted-foreground">
+                <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-start">
+                  <div className="min-w-0">
+                    <p className="line-clamp-2 font-medium leading-6 text-foreground">{conversation.title}</p>
+                    <p className="mt-2 line-clamp-2 text-sm leading-5 text-muted-foreground">
                       {getConversationSummary(conversation)}
                     </p>
                   </div>
-                  <span className="text-xs text-muted-foreground">
+                  <span className="shrink-0 text-xs text-muted-foreground sm:pt-1">
                     {formatRelativeTime(conversation.updatedAt)}
                   </span>
                 </div>
@@ -303,13 +305,15 @@ export function HomePage() {
                         打开工作台
                       </Button>
                     ) : null}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`)}
-                    >
-                      继续创作
-                    </Button>
+                    {task.batch?.isBatch ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`)}
+                      >
+                        继续创作
+                      </Button>
+                    )}
                     <Button size="sm" variant="ghost" onClick={() => ignoreTask(task.id)}>
                       忽略
                     </Button>
@@ -339,6 +343,9 @@ export function HomePage() {
               <LibraryItemCard
                 key={item.asset.id}
                 item={item}
+                onEditAsset={(asset) =>
+                  navigate(`/create?fromTaskId=${item.task.id}&assetId=${asset.id}&mode=edit`)
+                }
                 actions={
                   <>
                     {item.conversation?.id ? (
@@ -346,19 +353,23 @@ export function HomePage() {
                         查看来源
                       </Button>
                     ) : null}
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=edit`)}
-                    >
-                      再编辑
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=variant&fork=1`)}
-                    >
-                      Fork
-                    </Button>
+                    {item.task.batch?.isBatch ? null : (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=edit`)}
+                      >
+                        再编辑
+                      </Button>
+                    )}
+                    {item.task.batch?.isBatch ? null : (
+                      <Button
+                        size="sm"
+                        onClick={() => navigate(`/create?fromTaskId=${item.task.id}&mode=variant&fork=1`)}
+                      >
+                        Fork
+                      </Button>
+                    )}
                   </>
                 }
               />

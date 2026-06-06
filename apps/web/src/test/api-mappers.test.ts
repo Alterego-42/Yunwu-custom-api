@@ -74,6 +74,78 @@ describe("api mappers", () => {
     });
   });
 
+  it("hydrates batch slot assets from embedded output summaries", () => {
+    const task = createTask({
+      batch: {
+        isBatch: true,
+        batchSize: 2,
+        returnedCount: 2,
+        successCount: 2,
+        failedCount: 0,
+        loadingCount: 0,
+      },
+      batchItems: [
+        {
+          id: "slot_1",
+          taskId: "task_1",
+          batchIndex: 0,
+          status: "succeeded",
+          progress: 100,
+          assetId: "asset_batch_1",
+          attempt: 1,
+          createdAt: "2026-04-24T10:00:00.000Z",
+          updatedAt: "2026-04-24T10:02:00.000Z",
+        },
+        {
+          id: "slot_2",
+          taskId: "task_1",
+          batchIndex: 1,
+          status: "succeeded",
+          progress: 100,
+          assetId: "asset_batch_2",
+          attempt: 1,
+          createdAt: "2026-04-24T10:00:00.000Z",
+          updatedAt: "2026-04-24T10:02:00.000Z",
+        },
+      ],
+      outputSummary: {
+        mocked: false,
+        generatedAssetIds: ["asset_batch_1", "asset_batch_2"],
+        assets: [
+          {
+            id: "asset_batch_1",
+            url: "/api/assets/asset_batch_1/content",
+            mimeType: "image/png",
+            width: 1024,
+            height: 1024,
+            batchIndex: 0,
+            batchItemId: "slot_1",
+          },
+          {
+            id: "asset_batch_2",
+            url: "/api/assets/asset_batch_2/content",
+            mimeType: "image/png",
+            width: 1536,
+            height: 1024,
+            batchIndex: 1,
+            batchItemId: "slot_2",
+          },
+        ],
+      },
+    });
+
+    const uiTask = toUiTask(task, []);
+
+    expect(uiTask.resultAssets?.map((asset) => asset.id)).toEqual([
+      "asset_batch_1",
+      "asset_batch_2",
+    ]);
+    expect(uiTask.batchSlots?.[1]?.asset).toMatchObject({
+      id: "asset_batch_2",
+      label: "1536 × 1024",
+    });
+  });
+
   it("keeps original input assets for invalid request recovery", () => {
     const task = createTask({
       status: "failed",

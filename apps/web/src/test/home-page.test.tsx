@@ -207,4 +207,60 @@ describe("home page", () => {
     expect(screen.queryByText("mocked random image")).toBeNull();
     expect(screen.queryByText("failed random image")).toBeNull();
   });
+
+  it("does not expose direct continue actions for batch recent tasks", async () => {
+    apiClientMock.getHome.mockResolvedValue({
+      recentConversations: [],
+      recentTasks: [
+        createTask(40, {
+          status: "succeeded",
+          canRetry: false,
+          failure: undefined,
+          batch: {
+            isBatch: true,
+            batchSize: 4,
+            returnedCount: 4,
+            successCount: 3,
+            failedCount: 1,
+            loadingCount: 0,
+            partialSuccess: true,
+          },
+        }),
+      ],
+      recentAssets: [],
+      recoveryTasks: [],
+    });
+
+    renderHomePage();
+
+    expect(await screen.findByText("recent task 40")).toBeTruthy();
+    expect(screen.getByText("批量 3 成功 / 1 失败")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "继续创作" })).toBeNull();
+  });
+
+  it("does not expose one-click retry for batch recovery tasks", async () => {
+    apiClientMock.getHome.mockResolvedValue({
+      recentConversations: [],
+      recentTasks: [],
+      recentAssets: [],
+      recoveryTasks: [
+        createTask(50, {
+          batch: {
+            isBatch: true,
+            batchSize: 3,
+            returnedCount: 3,
+            successCount: 0,
+            failedCount: 3,
+            loadingCount: 0,
+          },
+        }),
+      ],
+    });
+
+    renderHomePage();
+
+    expect(await screen.findByText("recent task 50")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "一键重试" })).toBeNull();
+    expect(screen.getByRole("button", { name: "打开工作台" })).toBeTruthy();
+  });
 });

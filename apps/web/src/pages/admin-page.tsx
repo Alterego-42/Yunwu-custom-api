@@ -108,6 +108,15 @@ function shortId(value?: string) {
   return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : value;
 }
 
+function formatBatchSummary(task: Pick<ApiTask, "batch">) {
+  const batch = task.batch;
+  if (!batch?.isBatch) {
+    return undefined;
+  }
+
+  return `Batch x${batch.batchSize} · success ${batch.successCount} / failed ${batch.failedCount} / running ${batch.loadingCount}`;
+}
+
 function formatTimestamp(value?: string) {
   if (!value) {
     return "-";
@@ -709,7 +718,7 @@ export function AdminPage() {
     }
 
     window.requestAnimationFrame(() => {
-      taskDetailRef.current?.scrollIntoView({
+      taskDetailRef.current?.scrollIntoView?.({
         behavior: "smooth",
         block: "start",
       });
@@ -1582,6 +1591,11 @@ export function AdminPage() {
                       <p className="mt-1 text-xs text-muted-foreground">
                         {task.capability} / {task.modelId}
                       </p>
+                      {task.batch?.isBatch ? (
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {formatBatchSummary(task)}
+                        </p>
+                      ) : null}
                     </TableCell>
                     <TableCell>
                       <Badge variant={task.status === "failed" ? "outline" : "secondary"}>
@@ -1612,6 +1626,7 @@ export function AdminPage() {
             disabled={
               !selectedTask ||
               selectedTask.status !== "failed" ||
+              Boolean(selectedTask.batch?.isBatch) ||
               retryingTaskId === selectedTask.id
             }
             onClick={() => selectedTask && void retryTask(selectedTask)}
@@ -1642,6 +1657,14 @@ export function AdminPage() {
                 <Badge variant="outline">{selectedTask.capability}</Badge>
                 <Badge variant="outline">{selectedTask.modelId}</Badge>
                 <Badge variant="outline">progress {selectedTask.progress ?? 0}%</Badge>
+                {selectedTask.batch?.isBatch ? (
+                  <>
+                    <Badge variant="outline">Batch x{selectedTask.batch.batchSize}</Badge>
+                    <Badge variant="outline">success {selectedTask.batch.successCount}</Badge>
+                    <Badge variant="outline">failed {selectedTask.batch.failedCount}</Badge>
+                    <Badge variant="outline">running {selectedTask.batch.loadingCount}</Badge>
+                  </>
+                ) : null}
               </div>
 
               <div className="grid gap-3 md:grid-cols-2">
@@ -1668,6 +1691,12 @@ export function AdminPage() {
                   label="Assets"
                   value={selectedTask.assetIds?.length ? selectedTask.assetIds.join(", ") : "-"}
                 />
+                {selectedTask.batch?.isBatch ? (
+                  <InfoItem
+                    label="Batch"
+                    value={formatBatchSummary(selectedTask) ?? "-"}
+                  />
+                ) : null}
               </div>
 
               <div className="grid gap-4 lg:grid-cols-2">
@@ -1686,6 +1715,14 @@ export function AdminPage() {
                   <h4 className="text-sm font-medium">Error</h4>
                   <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
                     {sanitizeSensitiveText(selectedTask.errorMessage)}
+                  </div>
+                </section>
+              ) : null}
+              {selectedTask.batch?.firstFailureMessage ? (
+                <section className="space-y-2">
+                  <h4 className="text-sm font-medium">First batch failure</h4>
+                  <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-4 text-sm text-destructive">
+                    {sanitizeSensitiveText(selectedTask.batch.firstFailureMessage)}
                   </div>
                 </section>
               ) : null}

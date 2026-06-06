@@ -764,11 +764,20 @@ export const apiClient = {
     return unwrapList<TaskEventRecord>(payload, "events");
   },
 
-  async retryTask(id: string) {
+  async retryTask(
+    id: string,
+    options: {
+      batchRetryCount?: number;
+    } = {},
+  ) {
     const payload = await request<RetryTaskResponse>(
       `/tasks/${encodeURIComponent(id)}/retry`,
       {
         method: "POST",
+        body:
+          options.batchRetryCount === undefined
+            ? undefined
+            : { batchRetryCount: options.batchRetryCount },
       },
     );
     return payload.task;

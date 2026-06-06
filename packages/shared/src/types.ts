@@ -58,6 +58,34 @@ export interface TaskRecord {
   errorMessage?: string;
   messages?: TaskMessage[];
   assetIds?: string[];
+  batch?: TaskBatchSummary;
+  batchItems?: TaskBatchItemRecord[];
+}
+
+export interface TaskBatchSummary {
+  isBatch: boolean;
+  batchSize: number;
+  returnedCount: number;
+  successCount: number;
+  failedCount: number;
+  loadingCount: number;
+  firstFailureMessage?: string;
+  partialSuccess?: boolean;
+}
+
+export interface TaskBatchItemRecord {
+  id: string;
+  taskId: string;
+  batchIndex: number;
+  status: TaskStatus;
+  progress: number;
+  assetId?: string;
+  errorMessage?: string;
+  attempt: number;
+  startedAt?: string;
+  completedAt?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ModelRecord {
@@ -125,6 +153,8 @@ export interface AssetRecord {
   mimeType?: string;
   width?: number;
   height?: number;
+  batchIndex?: number;
+  batchItemId?: string;
   createdAt: string;
 }
 
@@ -142,6 +172,11 @@ export interface CreateTaskInput {
   sourceTaskId?: string;
   sourceAction?: TaskSourceAction;
   fork?: boolean;
+  batchCount?: number;
+}
+
+export interface RetryTaskInput {
+  batchRetryCount?: number;
 }
 
 export interface UploadAssetResponse {

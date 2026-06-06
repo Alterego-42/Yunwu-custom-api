@@ -65,6 +65,26 @@ function buildTaskEvent(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function buildBatchItem(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "batch-item-1",
+    taskId: "task-1",
+    batchIndex: 0,
+    status: "queued",
+    progress: 0,
+    assetId: null,
+    errorMessage: null,
+    attempt: 0,
+    providerSummary: null,
+    output: null,
+    startedAt: null,
+    completedAt: null,
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  };
+}
+
 function buildTask(overrides: Record<string, unknown> = {}) {
   return {
     id: "task-1",
@@ -89,6 +109,7 @@ function buildTask(overrides: Record<string, unknown> = {}) {
     user: buildUser(),
     assets: [],
     events: [],
+    batchItems: [],
     ...overrides,
   };
 }
@@ -121,10 +142,17 @@ function createHarness(
     messageCreate: [] as Array<Record<string, unknown>>,
     taskEventCreate: [] as Array<Record<string, unknown>>,
     taskEventCreateMany: [] as Array<Record<string, unknown>>,
+    taskBatchItemCreateMany: [] as Array<Record<string, unknown>>,
+    taskBatchItemUpdateMany: [] as Array<Record<string, unknown>>,
     assetUpdate: [] as Array<Record<string, unknown>>,
     assetFindMany: [] as Array<Record<string, unknown>>,
     taskFindMany: [] as Array<Record<string, unknown>>,
     enqueued: [] as Array<{ taskId: string; source?: string }>,
+    batchEnqueued: [] as Array<{
+      taskId: string;
+      source?: string;
+      options?: Record<string, unknown>;
+    }>,
     published: [] as Array<Record<string, unknown>>,
     modelCapabilityUpsert: [] as Array<Record<string, unknown>>,
     userSettingsPersist: [] as Array<unknown>,
@@ -215,6 +243,19 @@ function createHarness(
       },
       findMany: async () => [],
     },
+    taskBatchItem: {
+      createMany: async ({ data }: { data: Record<string, unknown>[] }) => {
+        calls.taskBatchItemCreateMany.push({ data });
+        return { count: data.length };
+      },
+      findMany: async () => [],
+      updateMany: async (args: Record<string, unknown>) => {
+        calls.taskBatchItemUpdateMany.push(args);
+        return { count: 0 };
+      },
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) =>
+        buildBatchItem({ id: where.id, ...data }),
+    },
   };
 
   prisma.$transaction = async (
@@ -237,6 +278,13 @@ function createHarness(
   const taskQueue = {
     enqueueTask: async (taskId: string, source?: string) => {
       calls.enqueued.push({ taskId, source });
+    },
+    enqueueBatchTask: async (
+      taskId: string,
+      source?: string,
+      options?: Record<string, unknown>,
+    ) => {
+      calls.batchEnqueued.push({ taskId, source, options });
     },
   };
   const conversationEvents = {
@@ -866,6 +914,216 @@ test("createTask lazily creates a conversation and queues the task", async () =>
   assert.deepEqual(calls.enqueued, [{ taskId: "task-lazy", source: undefined }]);
 });
 
+test("createTask with batchCount creates batch items and queues a batch task", async () => {
+  const user = buildUser();
+  const conversation = buildConversation({
+    id: "conv-batch",
+    title: "Draw a lantern batch",
+  });
+  let createdTaskInput: Record<string, unknown> | undefined;
+  const batchItems = Array.from({ length: 3 }, (_, index) =>
+    buildBatchItem({
+      id: `batch-item-${index + 1}`,
+      taskId: "task-batch",
+      batchIndex: index,
+    }),
+  );
+
+  const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          baseUrl: "https://api3.wlai.vip",
+          enabledModelIds: ["gpt-image-1"],
+          ui: {},
+        },
+      ],
+    },
+    conversation: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.conversationCreate.push(data);
+        return buildConversation({
+          ...conversation,
+          title: data.title,
+          userId: data.userId,
+          metadata: data.metadata ?? null,
+        });
+      },
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === conversation.id
+          ? {
+              ...conversation,
+              messages: [],
+              tasks: [
+                buildTask({
+                  id: "task-batch",
+                  conversationId: conversation.id,
+                  conversation,
+                  input: createdTaskInput,
+                  batchItems,
+                }),
+              ],
+            }
+          : null,
+    },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskCreate.push(data);
+        createdTaskInput = data.input as Record<string, unknown>;
+        return buildTask({
+          id: "task-batch",
+          ...data,
+          conversation,
+          assets: [],
+          events: [],
+          batchItems: [],
+        });
+      },
+      findUniqueOrThrow: async () =>
+        buildTask({
+          id: "task-batch",
+          conversationId: conversation.id,
+          conversation,
+          assets: [],
+          events: [],
+          input: createdTaskInput,
+          batchItems,
+        }),
+    },
+  });
+
+  const response = await service.createTask(user as any, {
+    capability: "image.generate",
+    model: "gpt-image-1",
+    prompt: "Draw a lantern batch",
+    batchCount: 3,
+  });
+
+  assert.equal(calls.taskBatchItemCreateMany.length, 1);
+  assert.equal(
+    (calls.taskBatchItemCreateMany[0]?.data as Record<string, unknown>[]).length,
+    3,
+  );
+  assert.deepEqual(calls.batchEnqueued, [
+    { taskId: "task-batch", source: undefined, options: undefined },
+  ]);
+  assert.equal(response.task.batch?.isBatch, true);
+  assert.equal(response.task.batch?.batchSize, 3);
+  assert.equal(response.task.batchItems?.length, 3);
+});
+
+test("createTask rejects batch source re-edit with multiple selected assets", async () => {
+  const user = buildUser();
+  const sourceAssets = [
+    buildAsset({
+      id: "batch-asset-1",
+      type: "generated",
+      taskId: "task-batch-source",
+    }),
+    buildAsset({
+      id: "batch-asset-2",
+      type: "generated",
+      taskId: "task-batch-source",
+    }),
+  ];
+  const sourceTask = buildTask({
+    id: "task-batch-source",
+    userId: user.id,
+    status: "succeeded",
+    assets: sourceAssets,
+    input: { model: "gpt-image-2", prompt: "Batch source", batchCount: 2 },
+    batchItems: sourceAssets.map((asset, index) =>
+      buildBatchItem({
+        id: `batch-item-${index + 1}`,
+        taskId: "task-batch-source",
+        batchIndex: index,
+        status: "succeeded",
+        assetId: asset.id,
+      }),
+    ),
+  });
+
+  const { service } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === sourceTask.id ? sourceTask : null,
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        capability: "image.edit",
+        model: "gpt-image-2",
+        prompt: "Refine two batch outputs",
+        sourceTaskId: sourceTask.id,
+        sourceAction: "edit",
+        assetIds: sourceAssets.map((asset) => asset.id),
+      }),
+    /Choose exactly one successful batch image/,
+  );
+});
+
+test("createTask rejects batch source re-edit with an asset outside the source batch", async () => {
+  const user = buildUser();
+  const sourceAsset = buildAsset({
+    id: "batch-asset-1",
+    type: "generated",
+    taskId: "task-batch-source",
+  });
+  const unrelatedAsset = buildAsset({
+    id: "unrelated-generated-asset",
+    type: "generated",
+    taskId: "task-other",
+  });
+  const sourceTask = buildTask({
+    id: "task-batch-source",
+    userId: user.id,
+    status: "succeeded",
+    assets: [sourceAsset],
+    input: { model: "gpt-image-2", prompt: "Batch source", batchCount: 2 },
+    batchItems: [
+      buildBatchItem({
+        id: "batch-item-1",
+        taskId: "task-batch-source",
+        batchIndex: 0,
+        status: "succeeded",
+        assetId: sourceAsset.id,
+      }),
+      buildBatchItem({
+        id: "batch-item-2",
+        taskId: "task-batch-source",
+        batchIndex: 1,
+        status: "failed",
+        errorMessage: "Provider failed.",
+      }),
+    ],
+  });
+
+  const { service } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === sourceTask.id ? sourceTask : null,
+    },
+    asset: {
+      findMany: async () => [unrelatedAsset],
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      service.createTask(user as any, {
+        capability: "image.edit",
+        model: "gpt-image-2",
+        prompt: "Refine an unrelated asset",
+        sourceTaskId: sourceTask.id,
+        sourceAction: "edit",
+        assetIds: [unrelatedAsset.id],
+      }),
+    /Choose one successful batch image from the source batch task/,
+  );
+});
+
 test("createTask rejects another user's conversationId and assetIds", async () => {
   const user = buildUser({ id: "user-a" });
   const otherConversation = buildConversation({
@@ -1200,6 +1458,203 @@ test("retryTask retries succeeded tasks by copying original input", async () => 
   assert.equal(response.retriedFromTaskId, succeededTask.id);
   assert.equal(response.task.sourceTaskId, succeededTask.id);
   assert.equal(response.task.sourceAction, "retry");
+});
+
+test("retryTask keeps a one-slot batch retry round marked as batch", async () => {
+  const user = buildUser();
+  const conversation = buildConversation({ id: "conv-batch-retry" });
+  const sourceBatchItems = [
+    buildBatchItem({
+      id: "batch-source-1",
+      taskId: "task-batch-source",
+      batchIndex: 0,
+      status: "succeeded",
+      assetId: "generated-1",
+    }),
+    buildBatchItem({
+      id: "batch-source-2",
+      taskId: "task-batch-source",
+      batchIndex: 1,
+      status: "failed",
+      errorMessage: "Provider rate limited.",
+    }),
+  ];
+  const sourceTask = buildTask({
+    id: "task-batch-source",
+    status: "succeeded",
+    conversationId: conversation.id,
+    conversation,
+    input: {
+      model: "gpt-image-2",
+      prompt: "Retry a batch with one slot",
+      assetIds: [],
+      params: { size: "1024x1024" },
+      batchCount: 2,
+    },
+    output: {
+      batchSize: 2,
+      successCount: 1,
+      failedCount: 1,
+      returnedCount: 2,
+      loadingCount: 0,
+      firstFailureMessage: "Provider rate limited.",
+    },
+    batchItems: sourceBatchItems,
+    assets: [buildAsset({ id: "generated-1", type: "generated" })],
+  });
+  const retryBatchItems = [
+    buildBatchItem({
+      id: "batch-retry-1",
+      taskId: "task-batch-retry-one",
+      batchIndex: 0,
+    }),
+  ];
+  let retryTaskInput: Record<string, unknown> | undefined;
+
+  const { service, calls } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === sourceTask.id ? sourceTask : null,
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        calls.taskCreate.push(data);
+        retryTaskInput = data.input as Record<string, unknown>;
+        return buildTask({
+          id: "task-batch-retry-one",
+          ...data,
+          conversation,
+          assets: [],
+          events: [],
+          batchItems: [],
+        });
+      },
+      findUniqueOrThrow: async () =>
+        buildTask({
+          id: "task-batch-retry-one",
+          conversationId: conversation.id,
+          sourceTaskId: sourceTask.id,
+          sourceAction: "retry",
+          conversation,
+          assets: [],
+          events: [],
+          input: retryTaskInput,
+          batchItems: retryBatchItems,
+        }),
+    },
+  });
+
+  const response = await service.retryTask(user as any, sourceTask.id, {
+    batchRetryCount: 1,
+  });
+
+  assert.equal(calls.taskBatchItemCreateMany.length, 1);
+  assert.equal(
+    (calls.taskBatchItemCreateMany[0]?.data as Record<string, unknown>[]).length,
+    1,
+  );
+  assert.deepEqual(calls.batchEnqueued, [
+    { taskId: "task-batch-retry-one", source: "batch-retry", options: undefined },
+  ]);
+  assert.equal(response.retriedFromTaskId, sourceTask.id);
+  assert.equal(response.task.batch?.isBatch, true);
+  assert.equal(response.task.batch?.batchSize, 1);
+  assert.equal(response.task.batchItems?.length, 1);
+});
+
+test("retryTask with batchRetryCount zero resets failed batch slots in place", async () => {
+  const user = buildUser();
+  const conversation = buildConversation({ id: "conv-batch-in-place" });
+  const batchItems = [
+    buildBatchItem({
+      id: "batch-success-1",
+      taskId: "task-batch-in-place",
+      batchIndex: 0,
+      status: "succeeded",
+      assetId: "generated-1",
+      progress: 100,
+      attempt: 1,
+    }),
+    buildBatchItem({
+      id: "batch-failed-1",
+      taskId: "task-batch-in-place",
+      batchIndex: 1,
+      status: "failed",
+      errorMessage: "Provider rate limited.",
+      progress: 100,
+      attempt: 1,
+      completedAt: NOW,
+    }),
+  ];
+  const sourceTask = buildTask({
+    id: "task-batch-in-place",
+    status: "succeeded",
+    conversationId: conversation.id,
+    conversation,
+    input: {
+      model: "gpt-image-2",
+      prompt: "Retry failed slots in place",
+      assetIds: [],
+      params: { size: "1024x1024" },
+      batchCount: 2,
+    },
+    output: {
+      batchSize: 2,
+      successCount: 1,
+      failedCount: 1,
+      returnedCount: 2,
+      loadingCount: 0,
+      firstFailureMessage: "Provider rate limited.",
+    },
+    batchItems,
+    assets: [buildAsset({ id: "generated-1", type: "generated" })],
+  });
+
+  const { service, calls } = createHarness({
+    task: {
+      findFirst: async ({ where }: { where: { id?: string } }) =>
+        where.id === sourceTask.id ? sourceTask : null,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(sourceTask, data);
+        return sourceTask;
+      },
+      findUniqueOrThrow: async () => sourceTask,
+    },
+    taskBatchItem: {
+      updateMany: async (args: {
+        where: { id?: { in?: string[] } };
+        data: Record<string, unknown>;
+      }) => {
+        calls.taskBatchItemUpdateMany.push(args);
+        const ids = new Set(args.where.id?.in ?? []);
+        for (const item of batchItems) {
+          if (ids.has(item.id)) {
+            Object.assign(item, args.data);
+          }
+        }
+        return { count: ids.size };
+      },
+      findMany: async () => batchItems,
+    },
+  });
+
+  const response = await service.retryTask(user as any, sourceTask.id, {
+    batchRetryCount: 0,
+  });
+
+  assert.equal(calls.taskCreate.length, 0);
+  assert.equal(calls.taskBatchItemUpdateMany.length, 1);
+  assert.deepEqual(calls.batchEnqueued, [
+    {
+      taskId: sourceTask.id,
+      source: "batch-retry-failed-slots",
+      options: { dedupe: false },
+    },
+  ]);
+  assert.equal(batchItems[0]?.status, "succeeded");
+  assert.equal(batchItems[1]?.status, "queued");
+  assert.equal(batchItems[1]?.errorMessage, null);
+  assert.equal(response.task.id, sourceTask.id);
+  assert.equal(response.task.batch?.successCount, 1);
+  assert.equal(response.task.batch?.loadingCount, 1);
 });
 
 test("retryTask retries failed tasks even when failure details are non-retryable", async () => {

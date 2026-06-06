@@ -134,6 +134,7 @@ model Asset {
   user      User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
   message   Message?    @relation(fields: [messageId], references: [id], onDelete: SetNull)
   task      Task?       @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  batchItems TaskBatchItem[]
 
   @@index([userId])
   @@index([messageId])
@@ -161,12 +162,37 @@ model Task {
   derivedTasks   Task[]           @relation("TaskSource")
   assets         Asset[]
   events         TaskEvent[]
+  batchItems     TaskBatchItem[]
 
   @@index([userId])
   @@index([conversationId])
   @@index([sourceTaskId])
   @@index([status])
   @@map("tasks")
+}
+
+model TaskBatchItem {
+  id              String     @id @default(cuid())
+  taskId          String     @map("task_id")
+  batchIndex      Int        @map("batch_index")
+  status          TaskStatus @default(queued)
+  progress        Int        @default(0)
+  assetId         String?    @map("asset_id")
+  errorMessage    String?    @map("error_message")
+  attempt         Int        @default(0)
+  providerSummary Json?      @map("provider_summary")
+  output          Json?
+  startedAt       DateTime?  @map("started_at")
+  completedAt     DateTime?  @map("completed_at")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+  task            Task       @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  asset           Asset?     @relation(fields: [assetId], references: [id], onDelete: SetNull)
+
+  @@unique([taskId, batchIndex])
+  @@index([taskId])
+  @@index([status])
+  @@map("task_batch_items")
 }
 
 model TaskEvent {

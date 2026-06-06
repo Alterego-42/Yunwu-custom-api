@@ -88,6 +88,49 @@ describe("composer upload edit flow", () => {
     );
   });
 
+  it("submits the clamped batch count", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <Composer
+        models={[createModel()]}
+        initialDraft={{
+          prompt: "draw several quiet variations",
+        }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const batchInput = screen.getByLabelText("并发次数") as HTMLInputElement;
+
+    expect(batchInput.value).toBe("1");
+
+    fireEvent.change(batchInput, { target: { value: "25" } });
+    expect(batchInput.value).toBe("20");
+
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        batchCount: 20,
+      }),
+    );
+  });
+
+  it("does not render the inactive draft button", () => {
+    render(
+      <Composer
+        models={[createModel()]}
+        initialDraft={{
+          prompt: "draw without dead controls",
+        }}
+        onSubmit={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "保存草稿" })).toBeNull();
+  });
+
   it("omits size when automatic size is selected", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 

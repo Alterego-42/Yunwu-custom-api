@@ -50,7 +50,7 @@ function createProvider(): AdminProviderStatus {
   };
 }
 
-function createTask(): TaskRecord {
+function createTask(overrides: Partial<TaskRecord> = {}): TaskRecord {
   return {
     id: "task_admin_1",
     capability: "image.generate",
@@ -60,6 +60,7 @@ function createTask(): TaskRecord {
     createdAt: "2026-05-01T08:00:00.000Z",
     updatedAt: "2026-05-01T08:05:00.000Z",
     assetIds: [],
+    ...overrides,
   };
 }
 
@@ -79,9 +80,7 @@ function createLogsResponse(): AdminLogsResponse {
   };
 }
 
-function setupApiMocks() {
-  const task = createTask();
-
+function setupApiMocks(task = createTask()) {
   apiClientMock.getBaseUrl.mockReturnValue("http://127.0.0.1:3000/api");
   apiClientMock.getAdminProvider.mockResolvedValue(createProvider());
   apiClientMock.listAdminModelCapabilities.mockResolvedValue([]);
@@ -129,6 +128,41 @@ describe("admin page logs", () => {
       expect(apiClientMock.listAdminLogs).toHaveBeenCalledWith(
         expect.objectContaining({ level: "ERROR" }),
       );
+    });
+  });
+
+  it("renders batch metadata in the task list and detail panel", async () => {
+    setupApiMocks(
+      createTask({
+        id: "task_batch_admin",
+        batch: {
+          isBatch: true,
+          batchSize: 4,
+          returnedCount: 3,
+          successCount: 2,
+          failedCount: 1,
+          loadingCount: 1,
+          firstFailureMessage: "Provider rate limited.",
+          partialSuccess: true,
+        },
+      }),
+    );
+
+    render(<AdminPage />);
+
+    expect(
+      await screen.findAllByText("Batch x4 · success 2 / failed 1 / running 1"),
+    ).toHaveLength(2);
+
+    fireEvent.click(screen.getByText("task_b...dmin"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Batch x4")).toBeTruthy();
+      expect(screen.getByText("success 2")).toBeTruthy();
+      expect(screen.getByText("failed 1")).toBeTruthy();
+      expect(screen.getByText("running 1")).toBeTruthy();
+      expect(screen.getByText("First batch failure")).toBeTruthy();
+      expect(screen.getByText("Provider rate limited.")).toBeTruthy();
     });
   });
 });

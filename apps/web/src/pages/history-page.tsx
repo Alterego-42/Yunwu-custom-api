@@ -102,20 +102,24 @@ export function HistoryPage() {
                       打开工作台
                     </Button>
                   ) : null}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`)}
-                  >
-                    继续创作
-                  </Button>
-                  <Button
-                    size="sm"
-                    onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=variant&fork=1`)}
-                  >
-                    Fork
-                  </Button>
-                  {task.canRetry ? (
+                  {task.batch?.isBatch ? null : (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=${getTaskIntentMode(task)}`)}
+                    >
+                      继续创作
+                    </Button>
+                  )}
+                  {task.batch?.isBatch ? null : (
+                    <Button
+                      size="sm"
+                      onClick={() => navigate(`/create?fromTaskId=${task.id}&mode=variant&fork=1`)}
+                    >
+                      Fork
+                    </Button>
+                  )}
+                  {task.canRetry && !task.batch?.isBatch ? (
                     <Button size="sm" onClick={() => void handleRetry(task)}>
                       <RefreshCcw className="h-4 w-4" />
                       重试
