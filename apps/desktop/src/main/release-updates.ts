@@ -1,3 +1,4 @@
+import { net } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -6,7 +7,9 @@ const repoOwner = "Alterego-42";
 const repoName = "Yunwu-custom-api";
 const releaseManifestAssetName = "yunwu-release.json";
 const githubLatestReleaseApiUrl = `https://api.github.com/repos/${repoOwner}/${repoName}/releases/latest`;
+const githubLatestManifestUrl = `https://github.com/${repoOwner}/${repoName}/releases/latest/download/${releaseManifestAssetName}`;
 const githubReleaseTagPathPattern = new RegExp(`^/${repoOwner}/${repoName}/releases/tag/v\\d+\\.\\d+\\.\\d+$`, "i");
+const defaultReleaseFetchTimeoutMs = 30_000;
 
 export type UpdatePhase =
   | "unknown"
@@ -102,6 +105,11 @@ function asBoolean(value: unknown, fallback = false) {
 
 function asNumber(value: unknown, fallback = 0) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function getPositiveIntegerEnv(name: string, fallback: number) {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
 export function toImageTag(version: string) {
@@ -315,11 +323,27 @@ function parseManifest(value: unknown): ReleaseManifest {
   };
 }
 
+function describeFetchError(error: unknown) {
+  if (error instanceof Error) {
+    if (error.name === "AbortError") {
+      return `GitHub 更新检查超时（${Math.round(getPositiveIntegerEnv("YUNWU_DESKTOP_RELEASE_TIMEOUT_MS", defaultReleaseFetchTimeoutMs) / 1000)} 秒）。请检查网络或稍后重试；这不会影响本地已安装版本继续使用。`;
+    }
+    if (/aborted|aborterror/i.test(error.message)) {
+      return "GitHub 更新检查被中止。请检查网络或稍后重试；这不会影响本地已安装版本继续使用。";
+    }
+    return error.message;
+  }
+  return String(error);
+}
+
 async function fetchJson(url: string) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(
+    () => controller.abort(),
+    getPositiveIntegerEnv("YUNWU_DESKTOP_RELEASE_TIMEOUT_MS", defaultReleaseFetchTimeoutMs)
+  );
   try {
-    const response = await fetch(url, {
+    const response = await net.fetch(url, {
       headers: {
         Accept: "application/vnd.github+json, application/json",
         "User-Agent": "Yunwu-Desktop-Updater"
@@ -364,6 +388,12 @@ async function fetchLatestManifest() {
   const manifestOverrideUrl = process.env.YUNWU_DESKTOP_RELEASE_MANIFEST_URL?.trim();
   if (manifestOverrideUrl) {
     return parseManifest(await fetchJson(manifestOverrideUrl));
+  }
+
+  try {
+    return parseManifest(await fetchJson(githubLatestManifestUrl));
+  } catch {
+    // Older releases did not have a manifest; fall back to the GitHub Release API.
   }
 
   const releaseApiUrl = process.env.YUNWU_DESKTOP_RELEASE_API_URL?.trim() || githubLatestReleaseApiUrl;
@@ -484,7 +514,7 @@ export async function checkForUpdates(runtimeDir: string, state: ReleaseState) {
     await saveReleaseState(runtimeDir, nextState);
     return { state: nextState, status };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeFetchError(error);
     const checkedAt = new Date().toISOString();
     const nextState: ReleaseState = {
       ...state,

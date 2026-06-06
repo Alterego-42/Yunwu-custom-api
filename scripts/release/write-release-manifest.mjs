@@ -69,7 +69,7 @@ const manifest = {
   releaseNotes: {
     summary:
       process.env.YUNWU_RELEASE_SUMMARY ??
-      "Adds batch concurrent image requests and an update-aware desktop baseline.",
+      "Hardens desktop update checks and Docker image pull retries.",
     url: `https://github.com/${repo}/releases/tag/${tag}`
   },
   desktop: {
@@ -103,11 +103,11 @@ const manifest = {
       .filter(Boolean)
   },
   compatibility: {
-    from: (process.env.YUNWU_RELEASE_COMPAT_FROM ?? "v0.4.3")
+    from: (process.env.YUNWU_RELEASE_COMPAT_FROM ?? "v0.4.3,v0.5.0")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
-    requiresManualZipUpgradeFrom: (process.env.YUNWU_RELEASE_MANUAL_ZIP_FROM ?? "v0.4.3")
+    requiresManualZipUpgradeFrom: (process.env.YUNWU_RELEASE_MANUAL_ZIP_FROM ?? "v0.4.3,v0.5.0")
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean)

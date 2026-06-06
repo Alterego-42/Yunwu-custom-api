@@ -636,6 +636,20 @@ function isPortAllocatedMessage(message: string) {
   return /port is already allocated|bind:|Ports are not available/i.test(message);
 }
 
+function isImagePullNetworkError(message: string) {
+  return /\bEOF\b|unexpected EOF|Client\.Timeout|TLS handshake timeout|i\/o timeout|context deadline exceeded|connection reset|failed to do request|httpReadSeeker|network is unreachable|no route to host|proxyconnect tcp|temporary failure/i.test(
+    message
+  );
+}
+
+function getImagePullNetworkHint() {
+  return "Docker 镜像拉取失败：网络连接在访问 GHCR/Docker Hub 时中断。请检查 Docker Desktop 的网络和代理设置；如使用代理，请在 Docker Desktop 设置中配置 HTTP/HTTPS Proxy 后点击重试。";
+}
+
+function delay(ms: number) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
+}
+
 function runComposeProcess(args: string[], detail: string) {
   return new Promise<void>((resolvePromise, reject) => {
     pushLog(`Running docker ${args.join(" ")}`);
@@ -669,6 +683,33 @@ function runComposeProcess(args: string[], detail: string) {
   });
 }
 
+async function runComposeProcessWithNetworkRetry(args: string[], detail: string, maxAttempts = 3) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const attemptDetail = maxAttempts > 1 ? `${detail}（第 ${attempt}/${maxAttempts} 次）` : detail;
+      await runComposeProcess(args, attemptDetail);
+      return;
+    } catch (error) {
+      lastError = error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (attempt >= maxAttempts || !isImagePullNetworkError(message)) {
+        throw error;
+      }
+
+      const waitMs = attempt * 8000;
+      pushLog(`Docker image pull network error; retrying in ${Math.round(waitMs / 1000)} seconds.`);
+      setService("Compose Stack", {
+        status: "running",
+        detail: "镜像拉取网络中断，正在自动重试。"
+      });
+      await delay(waitMs);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
 async function startCompose(envPath: string, overridePath: string) {
   const infraCompose = getResourcePath("infra", "docker-compose.yml");
   const desktopCompose = getResourcePath("infra", "docker-compose.desktop.yml");
@@ -676,14 +717,17 @@ async function startCompose(envPath: string, overridePath: string) {
   const buildImages = shouldBuildImages();
 
   if (!buildImages) {
-    try {
-      await runComposeProcess(
-        ["compose", ...composeFiles, "pull"],
-        "正在拉取 GHCR 镜像，若本机已有镜像则可失败继续。"
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      pushLog(`docker compose pull failed, continuing with local images: ${message}`);
+    const pullServices = ["postgres", "redis", "minio", "minio-init", "api", "worker", "web"];
+    for (const service of pullServices) {
+      try {
+        await runComposeProcessWithNetworkRetry(
+          ["compose", ...composeFiles, "pull", service],
+          `正在拉取 ${service} 镜像，若本机已有镜像则可失败继续。`
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        pushLog(`docker compose pull ${service} failed, continuing with local images: ${message}`);
+      }
     }
   }
 
@@ -702,7 +746,7 @@ async function startCompose(envPath: string, overridePath: string) {
     upArgs.push("--build");
   }
 
-  await runComposeProcess(
+  await runComposeProcessWithNetworkRetry(
     upArgs,
     buildImages ? "开发/显式构建模式：正在执行 docker compose up -d --build" : "正在执行 docker compose up -d"
   );
@@ -849,7 +893,11 @@ async function startStack() {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(message);
-    setPhase("error", message);
+    const userMessage = isImagePullNetworkError(message) ? getImagePullNetworkHint() : message;
+    if (isImagePullNetworkError(message)) {
+      setService("Compose Stack", { status: "error", detail: userMessage });
+    }
+    setPhase("error", userMessage);
   } finally {
     isStarting = false;
   }
