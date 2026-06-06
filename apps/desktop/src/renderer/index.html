@@ -9,7 +9,7 @@
   <body>
     <main class="shell">
       <section class="hero">
-        <p class="eyebrow">Yunwu Desktop v0.4.3</p>
+        <p id="app-version-label" class="eyebrow">Yunwu Desktop</p>
         <h1>正在准备本地创作工作台</h1>
         <p id="message" class="message">准备启动本地服务。</p>
         <div class="actions">
@@ -29,6 +29,14 @@
         <article class="card">
           <h2>Docker 状态</h2>
           <dl class="facts">
+            <div>
+              <dt>桌面版本</dt>
+              <dd id="app-version">-</dd>
+            </div>
+            <div>
+              <dt>镜像标签</dt>
+              <dd id="image-tag">-</dd>
+            </div>
             <div>
               <dt>Docker CLI</dt>
               <dd id="docker-cli">unknown</dd>
@@ -58,6 +66,24 @@
               <dd id="user-data">-</dd>
             </div>
           </dl>
+        </article>
+        <article class="card">
+          <h2>版本更新</h2>
+          <dl class="facts">
+            <div>
+              <dt>更新状态</dt>
+              <dd id="update-phase">unknown</dd>
+            </div>
+            <div>
+              <dt>最新版本</dt>
+              <dd id="latest-version">-</dd>
+            </div>
+          </dl>
+          <p id="update-message" class="update-message">尚未检查更新。</p>
+          <div class="actions compact-actions">
+            <button id="check-updates" type="button" class="secondary">检查更新</button>
+            <button id="release-page" type="button" class="ghost">打开发布页</button>
+          </div>
         </article>
       </section>
 

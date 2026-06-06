@@ -94,6 +94,10 @@ h2 {
   margin-top: 28px;
 }
 
+.compact-actions {
+  margin-top: 18px;
+}
+
 button {
   border: 0;
   border-radius: 999px;
@@ -204,6 +208,14 @@ button.ghost {
   margin: 6px 0 0;
   overflow-wrap: anywhere;
   font-weight: 700;
+}
+
+.update-message {
+  min-height: 44px;
+  margin: 18px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.55;
 }
 
 .logs-card {

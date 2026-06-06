@@ -6,6 +6,15 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
+import {
+  checkForUpdates,
+  createCheckingUpdateStatus,
+  createInitialUpdateStatus,
+  defaultReleaseState,
+  loadReleaseState,
+  type ReleaseState,
+  type UpdateStatus
+} from "./release-updates";
 
 type Phase = "idle" | "checking" | "starting" | "waiting" | "ready" | "error";
 
@@ -23,6 +32,8 @@ type DesktopStatus = {
   message: string;
   logs: string[];
   services: ServiceStatus[];
+  desktopVersion: string;
+  currentImageTag: string;
   webUrl: string;
   adminUrl: string;
   instanceId: string;
@@ -60,6 +71,8 @@ let runtimeIdentity: RuntimeIdentity | undefined;
 let currentComposeFiles: { envPath: string; overridePath: string } | undefined;
 let isExitingAfterCleanup = false;
 let shutdownCleanupPromise: Promise<void> | undefined;
+let releaseState: ReleaseState = defaultReleaseState(app.getVersion());
+let updateStatus: UpdateStatus = createInitialUpdateStatus(releaseState);
 
 type RuntimeIdentity = {
   instanceId: string;
@@ -97,6 +110,8 @@ const status: DesktopStatus = {
     { name: "API /readiness", status: "pending" },
     { name: "Web /health", status: "pending" }
   ],
+  desktopVersion: releaseState.desktopVersion,
+  currentImageTag: releaseState.currentImageTag,
   webUrl: getRuntimeUrls().webUrl,
   adminUrl: getRuntimeUrls().adminUrl,
   instanceId: "",
@@ -127,6 +142,43 @@ function setPhase(phase: Phase, message: string) {
 
 function broadcastStatus() {
   mainWindow?.webContents.send("desktop:status", status);
+}
+
+function broadcastUpdateStatus() {
+  mainWindow?.webContents.send("desktop:update-status", updateStatus);
+}
+
+function getRuntimeDir() {
+  return join(app.getPath("userData"), "runtime");
+}
+
+async function ensureRuntimeReleaseState() {
+  const shouldResetUpdateStatus = updateStatus.phase === "unknown";
+  releaseState = await loadReleaseState(getRuntimeDir(), app.getVersion());
+  updateStatus = shouldResetUpdateStatus
+    ? createInitialUpdateStatus(releaseState)
+    : {
+        ...updateStatus,
+        currentDesktopVersion: releaseState.desktopVersion,
+        currentImageTag: releaseState.currentImageTag
+      };
+  status.desktopVersion = releaseState.desktopVersion;
+  status.currentImageTag = releaseState.currentImageTag;
+  broadcastStatus();
+  broadcastUpdateStatus();
+  return releaseState;
+}
+
+async function checkDesktopUpdates() {
+  updateStatus = createCheckingUpdateStatus(releaseState);
+  broadcastUpdateStatus();
+  const result = await checkForUpdates(getRuntimeDir(), releaseState);
+  releaseState = result.state;
+  updateStatus = result.status;
+  status.currentImageTag = releaseState.currentImageTag;
+  broadcastStatus();
+  broadcastUpdateStatus();
+  return updateStatus;
 }
 
 function runCommand(command: string, args: string[], options: { cwd?: string; timeoutMs?: number } = {}) {
@@ -378,8 +430,9 @@ async function selectRuntimePorts() {
 
 async function writeRuntimeFiles() {
   const userData = app.getPath("userData");
-  const runtimeDir = join(userData, "runtime");
+  const runtimeDir = getRuntimeDir();
   await mkdir(runtimeDir, { recursive: true });
+  const currentReleaseState = await ensureRuntimeReleaseState();
   runtimeIdentity = await loadRuntimeIdentity(runtimeDir, userData);
 
   const envPath = join(runtimeDir, ".env");
@@ -400,8 +453,10 @@ async function writeRuntimeFiles() {
     "MINIO_BUCKET=yunwu-assets",
     "MINIO_USE_SSL=false",
     "TASK_QUEUE_NAME=yunwu-image-tasks",
+    "TASK_BATCH_QUEUE_NAME=yunwu-image-batch-tasks",
     "TASK_WORKER_ENABLED=true",
-    "TASK_WORKER_CONCURRENCY=2",
+    "TASK_WORKER_CONCURRENCY=50",
+    "TASK_BATCH_WORKER_CONCURRENCY=2",
     "YUNWU_BASE_URL=https://yunwu.ai",
     "YUNWU_API_KEY=",
     "AUTH_ADMIN_EMAIL=admin@yunwu.local",
@@ -418,7 +473,7 @@ async function writeRuntimeFiles() {
     `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
     `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.web}/api/assets`,
     "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
-    "YUNWU_IMAGE_TAG=v0.4.3",
+    `YUNWU_IMAGE_TAG=${currentReleaseState.currentImageTag}`,
     `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
   ].join("\n");
 
@@ -805,6 +860,7 @@ async function createWindow() {
   log.initialize();
   log.transports.file.resolvePathFn = () => join(app.getPath("userData"), "desktop.log");
   status.logPath = log.transports.file.getFile().path;
+  await ensureRuntimeReleaseState();
 
   mainWindow = new BrowserWindow({
     width: 1180,
@@ -820,6 +876,12 @@ async function createWindow() {
   });
 
   await mainWindow.loadFile(join(__dirname, "..", "renderer", "index.html"));
+  broadcastStatus();
+  broadcastUpdateStatus();
+  void checkDesktopUpdates().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`Update check failed: ${message}`);
+  });
   mainWindow.on("close", (event) => {
     if (isExitingAfterCleanup || !currentComposeFiles) {
       return;
@@ -840,6 +902,17 @@ async function createWindow() {
 }
 
 ipcMain.handle("desktop:get-status", () => status);
+ipcMain.handle("desktop:get-update-status", () => updateStatus);
+ipcMain.handle("desktop:check-updates", async () => {
+  return checkDesktopUpdates();
+});
+ipcMain.handle("desktop:open-release-page", async () => {
+  await shell.openExternal(
+    updateStatus.releaseUrl ??
+      releaseState.lastKnownLatest?.releaseUrl ??
+      "https://github.com/Alterego-42/Yunwu-custom-api/releases"
+  );
+});
 ipcMain.handle("desktop:retry", async () => {
   await mainWindow?.loadFile(join(__dirname, "..", "renderer", "index.html"));
   void startStack();
