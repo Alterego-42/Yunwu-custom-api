@@ -148,6 +148,21 @@ function broadcastUpdateStatus() {
   mainWindow?.webContents.send("desktop:update-status", updateStatus);
 }
 
+async function clearWorkbenchCache() {
+  const workbenchSession = mainWindow?.webContents.session;
+  if (!workbenchSession) {
+    return;
+  }
+
+  try {
+    await workbenchSession.clearCache();
+    pushLog("Desktop browser HTTP cache cleared before opening workbench.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`Desktop browser cache clear failed: ${message}`);
+  }
+}
+
 function getRuntimeDir() {
   return join(app.getPath("userData"), "runtime");
 }
@@ -889,6 +904,7 @@ async function startStack() {
     }
     await waitForHealth();
     setPhase("ready", "服务已就绪，正在打开工作台。");
+    await clearWorkbenchCache();
     await mainWindow?.loadURL(getRuntimeUrls().webUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -972,9 +988,11 @@ ipcMain.handle("desktop:open-docker-download", async () => {
   await openDockerInstallGuide();
 });
 ipcMain.handle("desktop:open-workbench", async () => {
+  await clearWorkbenchCache();
   await mainWindow?.loadURL(getRuntimeUrls().webUrl);
 });
 ipcMain.handle("desktop:open-admin", async () => {
+  await clearWorkbenchCache();
   await mainWindow?.loadURL(getRuntimeUrls().adminUrl);
 });
 ipcMain.handle("desktop:open-user-data", async () => {
