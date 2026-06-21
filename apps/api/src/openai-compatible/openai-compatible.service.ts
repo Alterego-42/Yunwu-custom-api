@@ -109,6 +109,42 @@ const RESERVED_IMAGE_REQUEST_PARAM_KEYS = new Set([
   "providerBaseUrl",
 ]);
 
+const GROK_IMAGE_EDIT_PARAM_KEYS = new Set([
+  "aspect_ratio",
+  "response_format",
+  "resolution",
+  "quality",
+  "n",
+]);
+
+const GROK_IMAGE_SIZE_TO_ASPECT_RATIO = new Map([
+  ["960x960", "1:1"],
+  ["1024x1024", "1:1"],
+  ["720x1280", "9:16"],
+  ["1280x720", "16:9"],
+  ["1168x784", "3:2"],
+  ["784x1168", "2:3"],
+  ["1536x1024", "3:2"],
+  ["1024x1536", "2:3"],
+]);
+
+const GROK_IMAGE_ASPECT_RATIOS = new Set([
+  "1:1",
+  "3:4",
+  "4:3",
+  "9:16",
+  "16:9",
+  "2:3",
+  "3:2",
+  "9:19.5",
+  "19.5:9",
+  "9:20",
+  "20:9",
+  "1:2",
+  "2:1",
+  "auto",
+]);
+
 export const PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE =
   "Provider API key is not configured; real image generation is unavailable.";
 
@@ -271,10 +307,10 @@ export class OpenAICompatibleService {
     formData.append("prompt", request.prompt);
     this.appendFormDataParams(
       formData,
-      this.sanitizeImageRequestParams(request.params),
+      this.resolveImageEditRequestParams(request),
     );
 
-    const inputAssets = request.inputAssets ?? [];
+    const inputAssets = this.resolveImageEditInputAssets(request);
     if (inputAssets.length === 0) {
       throw new Error("OpenAI-compatible image edit requires at least one input asset.");
     }
@@ -646,6 +682,39 @@ export class OpenAICompatibleService {
           value !== null,
       ),
     );
+  }
+
+  private resolveImageEditRequestParams(request: OpenAICompatibleImageRequest) {
+    const params = this.sanitizeImageRequestParams(request.params);
+    if (!this.isGrokImageEditRequest(request)) {
+      return params;
+    }
+
+    const normalized: Record<string, unknown> = {};
+    for (const key of GROK_IMAGE_EDIT_PARAM_KEYS) {
+      const value = params[key];
+      if (value !== undefined && value !== null) {
+        normalized[key] = value;
+      }
+    }
+
+    if (normalized.aspect_ratio === undefined) {
+      const aspectRatio = this.resolveGrokImageAspectRatio(params.size);
+      if (aspectRatio) {
+        normalized.aspect_ratio = aspectRatio;
+      }
+    }
+
+    return normalized;
+  }
+
+  private resolveImageEditInputAssets(request: OpenAICompatibleImageRequest) {
+    const inputAssets = request.inputAssets ?? [];
+    if (this.isGrokImageEditRequest(request)) {
+      return inputAssets.slice(0, 1);
+    }
+
+    return inputAssets;
   }
 
   private async loadInputAssetFile(
@@ -1101,6 +1170,22 @@ export class OpenAICompatibleService {
     return undefined;
   }
 
+  private resolveGrokImageAspectRatio(value: unknown) {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    const normalized = value.trim().toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+
+    return (
+      GROK_IMAGE_SIZE_TO_ASPECT_RATIO.get(normalized) ??
+      (GROK_IMAGE_ASPECT_RATIOS.has(normalized) ? normalized : undefined)
+    );
+  }
+
   private extensionFromMimeType(mimeType?: string | null) {
     switch (mimeType) {
       case "image/jpeg":
@@ -1135,6 +1220,10 @@ export class OpenAICompatibleService {
 
   private isGeminiImageEditRequest(request: OpenAICompatibleImageRequest) {
     return request.capability === "image.edit" && request.model.startsWith("gemini-");
+  }
+
+  private isGrokImageEditRequest(request: OpenAICompatibleImageRequest) {
+    return request.capability === "image.edit" && request.model.startsWith("grok-");
   }
 
   private resolveImageEndpointPath(request: OpenAICompatibleImageRequest) {

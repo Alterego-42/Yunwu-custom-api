@@ -15,7 +15,7 @@ services:
       ai.yunwu.desktop.runtime: "true"
 
   api:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.5.0}
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-api:${YUNWU_IMAGE_TAG:-v0.5.1}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -77,7 +77,7 @@ services:
       start_period: 45s
 
   worker:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-worker:${YUNWU_IMAGE_TAG:-v0.5.0}
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-worker:${YUNWU_IMAGE_TAG:-v0.5.1}
     restart: unless-stopped
     depends_on:
       api:
@@ -113,7 +113,7 @@ services:
       start_period: 30s
 
   web:
-    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-web:${YUNWU_IMAGE_TAG:-v0.5.0}
+    image: ${YUNWU_IMAGE_REGISTRY:-ghcr.io/alterego-42}/yunwu-custom-api-web:${YUNWU_IMAGE_TAG:-v0.5.1}
     restart: unless-stopped
     depends_on:
       api:

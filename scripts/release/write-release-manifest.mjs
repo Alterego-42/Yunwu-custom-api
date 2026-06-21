@@ -51,7 +51,7 @@ const tag = normalizeTag(versionInput);
 const version = versionFromTag(tag);
 const artifactStat = await stat(artifactPath);
 const assetName = basename(artifactPath).replace(/\s+/g, ".");
-const hasDatabaseMigration = boolEnv("YUNWU_RELEASE_HAS_DATABASE_MIGRATION", true);
+const hasDatabaseMigration = boolEnv("YUNWU_RELEASE_HAS_DATABASE_MIGRATION", false);
 const requiresDesktopUpdate = boolEnv("YUNWU_RELEASE_REQUIRES_DESKTOP_UPDATE", true);
 const imageOnlySupported = boolEnv("YUNWU_RELEASE_IMAGE_ONLY_SUPPORTED", false);
 const updateBlocked = boolEnv("YUNWU_RELEASE_UPDATE_BLOCKED", false);
@@ -69,7 +69,7 @@ const manifest = {
   releaseNotes: {
     summary:
       process.env.YUNWU_RELEASE_SUMMARY ??
-      "Hardens desktop update checks and Docker image pull retries.",
+      "Ships a provider compatibility hotfix for Grok Image editing.",
     url: `https://github.com/${repo}/releases/tag/${tag}`
   },
   desktop: {
@@ -97,7 +97,7 @@ const manifest = {
     risk: process.env.YUNWU_RELEASE_MIGRATION_RISK ?? (hasDatabaseMigration ? "additive" : "none"),
     rollbackSupported: boolEnv("YUNWU_RELEASE_ROLLBACK_SUPPORTED", false),
     notes: (process.env.YUNWU_RELEASE_MIGRATION_NOTES ??
-      "Adds task_batch_items for batch execution slots.|Existing conversations, tasks, assets, users, and settings are preserved.")
+      "No database migration is introduced by this release.|Existing conversations, tasks, assets, users, and settings are preserved.")
       .split("|")
       .map((note) => note.trim())
       .filter(Boolean)

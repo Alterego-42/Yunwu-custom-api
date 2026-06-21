@@ -734,6 +734,94 @@ test("createImageTask posts image edit multipart with prompt, model, and image f
   }
 });
 
+test("createImageTask posts Grok Image edit with documented multipart fields", async () => {
+  const originalFetch = globalThis.fetch;
+  const tempDir = await mkdtemp(join(tmpdir(), "yunwu-grok-image-edit-"));
+  await writeFile(
+    join(tempDir, "asset.png"),
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
+  await writeFile(
+    join(tempDir, "extra.png"),
+    Buffer.from([0x89, 0x50, 0x4e, 0x48]),
+  );
+
+  let requestedUrl = "";
+  let requestedBody: FormData | undefined;
+  let requestedContentTypeHeader: string | undefined;
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    requestedUrl = url;
+    requestedBody = init?.body as FormData;
+    requestedContentTypeHeader = (
+      init?.headers as Record<string, string> | undefined
+    )?.["Content-Type"];
+
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [{ url: "https://example.com/grok-edited.jpg" }],
+      }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig(tempDir) as never,
+      createProviderConfig() as never,
+    );
+
+    await service.createImageTask({
+      capability: "image.edit",
+      model: "grok-imagine-image-pro",
+      prompt: "add a small duck near the subject",
+      baseUrl: "https://api3.wlai.vip",
+      inputAssets: [
+        {
+          id: "asset-1",
+          mimeType: "image/png",
+          storageKey: "asset.png",
+        },
+        {
+          id: "asset-2",
+          mimeType: "image/png",
+          storageKey: "extra.png",
+        },
+      ],
+      params: {
+        size: "720x1280",
+        quality: "high",
+        resolution: "1k",
+        response_format: "url",
+      },
+    });
+
+    assert.equal(requestedUrl, "https://api3.wlai.vip/v1/images/edits");
+    assert.equal(requestedContentTypeHeader, undefined);
+    assert.ok(requestedBody instanceof FormData);
+    assert.equal(requestedBody.get("model"), "grok-imagine-image-pro");
+    assert.equal(requestedBody.get("prompt"), "add a small duck near the subject");
+    assert.equal(requestedBody.get("size"), null);
+    assert.equal(requestedBody.get("aspect_ratio"), "9:16");
+    assert.equal(requestedBody.get("quality"), "high");
+    assert.equal(requestedBody.get("resolution"), "1k");
+    assert.equal(requestedBody.get("response_format"), "url");
+    const images = requestedBody.getAll("image");
+    assert.equal(images.length, 1);
+    const image = images[0];
+    assert.ok(image instanceof File);
+    assert.equal(image.name, "asset.png");
+    assert.deepEqual(
+      Array.from(new Uint8Array(await image.arrayBuffer())),
+      [0x89, 0x50, 0x4e, 0x47],
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("createImageTask posts Gemini image edit as multimodal chat JSON with data URL input", async () => {
   const originalFetch = globalThis.fetch;
   const tempDir = await mkdtemp(join(tmpdir(), "yunwu-gemini-image-edit-"));
