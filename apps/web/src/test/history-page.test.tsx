@@ -160,7 +160,12 @@ describe("history page", () => {
     fireEvent.click(screen.getByRole("button", { name: "预览素材 1536 × 1024" }));
 
     const dialog = screen.getByRole("dialog", { name: "1536 × 1024 预览" });
-    expect(within(dialog).getByRole("img", { name: "1536 × 1024" })).toBeTruthy();
-    expect(within(dialog).getByRole("link", { name: "打开原图" })).toBeTruthy();
+    const image = within(dialog).getByRole("img", { name: "1536 × 1024" });
+
+    expect(image.className).toContain("max-w-none");
+
+    fireEvent.click(dialog);
+
+    expect(screen.queryByRole("dialog", { name: "1536 × 1024 预览" })).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -7,17 +7,16 @@ import {
   ChevronRight,
   CircleDashed,
   Clock3,
-  Download,
   ExternalLink,
   Image as ImageIcon,
   LoaderCircle,
-  X,
   XCircle,
 } from "lucide-react";
 
 import { BatchResultModal } from "@/components/cards/batch-result-modal";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ImageLightbox } from "@/components/ui/image-lightbox";
 import { getSourceActionLabel, resolveAssetUrl } from "@/lib/api-mappers";
 import type { UiTask, UiTaskAsset, UiTaskRoundNavigation } from "@/lib/api-types";
 import { cn } from "@/lib/utils";
@@ -107,81 +106,6 @@ function TaskRoundSwitcher({ navigation }: { navigation?: TaskRoundNavigation })
   );
 }
 
-function TaskAssetLightbox({
-  asset,
-  assetUrl,
-  onClose,
-}: {
-  asset: NonNullable<UiTask["resultAssets"]>[number];
-  assetUrl: string;
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        onClose();
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label={`${asset.label} 预览`}
-      onClick={onClose}
-      data-testid="task-asset-lightbox"
-    >
-      <div
-        className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-white/15 bg-background shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-          <div className="min-w-0">
-            <p className="truncate text-sm font-medium text-foreground">{asset.label}</p>
-            <p className="text-xs text-muted-foreground">{asset.mimeType ?? asset.type}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <a
-              href={assetUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 px-3 text-xs text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-            >
-              <ExternalLink className="h-3.5 w-3.5" />
-              打开原图
-            </a>
-            <a
-              href={assetUrl}
-              download
-              rel="noreferrer"
-              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-white/10 px-3 text-xs text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-            >
-              <Download className="h-3.5 w-3.5" />
-              下载
-            </a>
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-              aria-label="关闭图片预览"
-              onClick={onClose}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-        <div className="min-h-0 overflow-auto bg-black/30 p-4">
-          <img src={assetUrl} alt={asset.label} className="mx-auto max-h-[75vh] max-w-full rounded-lg object-contain" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function TaskAssetPreview({
   asset,
 }: {
@@ -226,7 +150,12 @@ export function TaskAssetPreview({
           {content}
         </button>
         {isPreviewOpen ? (
-          <TaskAssetLightbox asset={asset} assetUrl={assetUrl} onClose={() => setIsPreviewOpen(false)} />
+          <ImageLightbox
+            imageUrl={assetUrl}
+            label={asset.label}
+            onClose={() => setIsPreviewOpen(false)}
+            testId="task-asset-lightbox"
+          />
         ) : null}
       </>
     );
@@ -256,7 +185,12 @@ function TaskInputAssetPreview({
         <span>{asset.label}</span>
       </button>
       {isPreviewOpen ? (
-        <TaskAssetLightbox asset={asset} assetUrl={assetUrl} onClose={() => setIsPreviewOpen(false)} />
+        <ImageLightbox
+          imageUrl={assetUrl}
+          label={asset.label}
+          onClose={() => setIsPreviewOpen(false)}
+          testId="task-asset-lightbox"
+        />
       ) : null}
     </>
   );

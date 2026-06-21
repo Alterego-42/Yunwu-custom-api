@@ -12,6 +12,7 @@ import {
   toModelLabel,
 } from "@/lib/api-mappers";
 import type { AssetRecord, CapabilityType, ModelRecord } from "@/lib/api-types";
+import { parsePromptDispatchInput } from "@/lib/prompt-dispatch";
 
 const capabilityOptions: Array<{ key: CapabilityType; label: string }> = [
   { key: "image.generate", label: "文生图" },
@@ -103,6 +104,7 @@ export function Composer({
   onRemoveUpload?: (assetId: string) => void;
   onSubmit: (input: {
     prompt: string;
+    prompts?: string[];
     model: string;
     capability: CapabilityType;
     assetIds?: string[];
@@ -125,6 +127,7 @@ export function Composer({
   const [batchCount, setBatchCount] = useState(clampBatchCount(initialDraft?.batchCount));
   const selectedSize = normalizeImageSizeParam(params.size);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const promptDispatch = useMemo(() => parsePromptDispatchInput(prompt), [prompt]);
 
   useEffect(() => {
     setPrompt(initialDraft?.prompt ?? "");
@@ -164,7 +167,17 @@ export function Composer({
   });
   const needsEditAsset = effectiveCapability === "image.edit" && uploads.length === 0;
   const uploadForcesEdit = uploads.length > 0;
-  const effectiveSubmitDisabledReason = submissionGuard.reason ?? submitDisabledReason ?? null;
+  const promptDispatchDisabledReason =
+    promptDispatch.status === "invalid"
+      ? `提示词结构未解析：${promptDispatch.reason}`
+      : null;
+  const effectiveSubmitDisabledReason = submissionGuard.reason ?? promptDispatchDisabledReason ?? submitDisabledReason ?? null;
+  const parsedTaskCount = promptDispatch.status === "parsed" ? promptDispatch.prompts.length : 0;
+  const baseSubmitLabel = submitLabel ?? "发送";
+  const submitButtonLabel =
+    parsedTaskCount > 1
+      ? `${baseSubmitLabel}（${parsedTaskCount} 个任务）`
+      : baseSubmitLabel;
   const isSubmitDisabled =
     !prompt.trim() ||
     !selectedModel ||
@@ -214,11 +227,17 @@ export function Composer({
       return;
     }
 
+    const promptList =
+      promptDispatch.status === "parsed"
+        ? promptDispatch.prompts
+        : [trimmedPrompt];
+
     setIsSubmitting(true);
     try {
       const { size: _ignoredSize, ...paramsWithoutSize } = params;
       await onSubmit({
-        prompt: trimmedPrompt,
+        prompt: promptList[0] ?? trimmedPrompt,
+        prompts: promptDispatch.status === "parsed" ? promptList : undefined,
         model: selectedModel,
         capability: effectiveCapability,
         assetIds: uploads.map((asset) => asset.id),
@@ -310,6 +329,22 @@ export function Composer({
           onChange={(event) => setPrompt(event.target.value)}
           disabled={disabled || isSubmitting}
         />
+        {promptDispatch.status === "parsed" ? (
+          <div
+            className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs text-sky-100"
+            data-testid="prompt-dispatch-status"
+          >
+            已解析到 {promptDispatch.prompts.length} 个任务。模型、参考图、尺寸、并发次数将共用当前设置。
+          </div>
+        ) : null}
+        {promptDispatch.status === "invalid" ? (
+          <div
+            className="rounded-xl border border-amber-400/40 bg-amber-400/10 px-3 py-2 text-xs text-amber-100"
+            data-testid="prompt-dispatch-status"
+          >
+            未解析到 prompt：{promptDispatch.reason} 示例：{`{prompt:"..."},{prompt:"..."}`}
+          </div>
+        ) : null}
         <input
           ref={fileInputRef}
           type="file"
@@ -413,7 +448,7 @@ export function Composer({
               title={effectiveSubmitDisabledReason ?? undefined}
             >
               <SendHorizonal className="h-4 w-4" />
-              {isSubmitting ? "发送中..." : submitLabel ?? "发送"}
+              {isSubmitting ? "发送中..." : submitButtonLabel}
             </Button>
           </div>
         </div>

@@ -119,6 +119,48 @@ describe("create page", () => {
     });
   });
 
+  it("dispatches parsed prompts into separate tasks in one new workspace", async () => {
+    apiClientMock.listModels.mockResolvedValue([createModel()]);
+    apiClientMock.createTask
+      .mockResolvedValueOnce({
+        task: createTask({ id: "task_first", prompt: "first prompt" }),
+        conversation: createConversation(),
+      })
+      .mockResolvedValueOnce({
+        task: createTask({ id: "task_second", prompt: "second prompt" }),
+        conversation: createConversation(),
+      });
+
+    renderCreatePage();
+
+    expect(await screen.findByText("发起创作")).toBeTruthy();
+    fireEvent.change(screen.getByPlaceholderText("输入提示词或调整说明，提交后进入工作台。"), {
+      target: { value: '{prompt:"first prompt"},{prompt:"second prompt"}' },
+    });
+
+    expect(screen.getByText(/已解析到 2 个任务/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "提交并进入工作台（2 个任务）" }));
+
+    await waitFor(() => {
+      expect(apiClientMock.createTask).toHaveBeenCalledTimes(2);
+      expect(apiClientMock.createTask).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          conversationId: undefined,
+          prompt: "first prompt",
+        }),
+      );
+      expect(apiClientMock.createTask).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          conversationId: "conv_created",
+          prompt: "second prompt",
+        }),
+      );
+      expect(screen.getByTestId("location").textContent).toBe("/workspace/conv_created");
+    });
+  });
+
   it("submits uploaded assets as image.edit with an edit-capable model", async () => {
     apiClientMock.listModels.mockResolvedValue([
       createModel({

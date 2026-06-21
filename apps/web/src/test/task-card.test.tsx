@@ -46,19 +46,18 @@ describe("task card", () => {
     cleanup();
   });
 
-  it("opens result assets in an in-page preview with original and download actions", () => {
+  it("opens result assets in a body-level 100 percent preview that closes on click", () => {
     render(<TaskCard task={createUiTask()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "预览素材 结果图" }));
 
     const dialog = screen.getByRole("dialog", { name: "结果图 预览" });
-    expect(within(dialog).getByRole("img", { name: "结果图" })).toBeTruthy();
-    expect(within(dialog).getByRole("link", { name: "打开原图" }).getAttribute("target")).toBe(
-      "_blank",
-    );
-    expect(within(dialog).getByRole("link", { name: "下载" }).hasAttribute("download")).toBe(true);
+    const image = within(dialog).getByRole("img", { name: "结果图" });
 
-    fireEvent.click(within(dialog).getByRole("button", { name: "关闭图片预览" }));
+    expect(image.className).toContain("max-w-none");
+    expect(dialog.parentElement).toBe(document.body);
+
+    fireEvent.click(dialog);
 
     expect(screen.queryByRole("dialog", { name: "结果图 预览" })).toBeNull();
   });
@@ -144,6 +143,16 @@ describe("task card", () => {
     expect(within(dialog).getByRole("img", { name: "批量结果 1" })).toBeTruthy();
     expect(within(dialog).getByText("#1")).toBeTruthy();
     expect(within(dialog).queryByText("#2")).toBeNull();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "预览批量结果 1" }));
+
+    const lightbox = screen.getByRole("dialog", { name: "批量结果 1 预览" });
+    expect(screen.getByTestId("batch-asset-lightbox")).toBe(lightbox);
+    expect(within(lightbox).getByRole("img", { name: "批量结果 1" }).className).toContain("max-w-none");
+
+    fireEvent.click(lightbox);
+
+    expect(screen.queryByRole("dialog", { name: "批量结果 1 预览" })).toBeNull();
 
     fireEvent.click(within(dialog).getByRole("button", { name: /再编辑/ }));
 

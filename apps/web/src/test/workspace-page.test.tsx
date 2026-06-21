@@ -324,6 +324,51 @@ describe("workspace page", () => {
     expect(messageBubble?.className).toContain("break-words");
   });
 
+  it("dispatches parsed prompts into separate tasks in the active workspace", async () => {
+    apiClientMock.createTask
+      .mockResolvedValueOnce({
+        task: createTask({ id: "task_dispatch_1", status: "queued", prompt: "first prompt" }),
+        conversation: createConversation("conv_1", "First", [
+          createTask({ id: "task_dispatch_1", status: "queued", prompt: "first prompt" }),
+        ]),
+      })
+      .mockResolvedValueOnce({
+        task: createTask({ id: "task_dispatch_2", status: "queued", prompt: "second prompt" }),
+        conversation: createConversation("conv_1", "First", [
+          createTask({ id: "task_dispatch_1", status: "queued", prompt: "first prompt" }),
+          createTask({ id: "task_dispatch_2", status: "queued", prompt: "second prompt" }),
+        ]),
+      });
+
+    renderWorkspace();
+
+    const composerInput = await screen.findByPlaceholderText("输入提示词、编辑指令或任务描述。发送后会创建真实任务。");
+    fireEvent.change(composerInput, {
+      target: { value: '{prompt:"first prompt"},{prompt:"second prompt"}' },
+    });
+
+    expect(screen.getByText(/已解析到 2 个任务/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "发送（2 个任务）" }));
+
+    await waitFor(() => {
+      expect(apiClientMock.createTask).toHaveBeenCalledTimes(2);
+      expect(apiClientMock.createTask).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          conversationId: "conv_1",
+          prompt: "first prompt",
+        }),
+      );
+      expect(apiClientMock.createTask).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          conversationId: "conv_1",
+          prompt: "second prompt",
+        }),
+      );
+    });
+  });
+
   it("retries failed retryable tasks and refreshes the current conversation", async () => {
     renderWorkspace();
 

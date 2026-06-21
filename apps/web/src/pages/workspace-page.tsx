@@ -585,6 +585,7 @@ export function WorkspacePage() {
   const handleSubmitTask = useCallback(
     async (input: {
       prompt: string;
+      prompts?: string[];
       model: string;
       capability: CapabilityType;
       assetIds?: string[];
@@ -596,34 +597,53 @@ export function WorkspacePage() {
       }
 
       setDetailError(null);
-      const response = await apiClient.createTask({
-        conversationId: activeId,
-        capability: input.capability,
-        model: input.model,
-        prompt: input.prompt,
-        assetIds: input.assetIds,
-        params: input.params,
-        batchCount: input.batchCount,
-        sourceTaskId: composerContext?.sourceTaskId,
-        sourceAction: composerContext?.sourceAction,
-        fork: composerContext?.fork,
-      });
+      const prompts = input.prompts?.length ? input.prompts : [input.prompt];
+      let targetConversationId = activeId;
+      let latestConversation: ConversationDetail | undefined;
 
-      applyConversation(response.conversation);
+      for (let index = 0; index < prompts.length; index += 1) {
+        const isFirstTask = index === 0;
+        const shouldForkTask = Boolean(composerContext?.fork && isFirstTask);
+        const shouldAttachSource = Boolean(
+          composerContext?.sourceTaskId && (!composerContext.fork || isFirstTask),
+        );
+        const response = await apiClient.createTask({
+          conversationId: shouldForkTask ? undefined : targetConversationId,
+          capability: input.capability,
+          model: input.model,
+          prompt: prompts[index] ?? input.prompt,
+          assetIds: input.assetIds,
+          params: input.params,
+          batchCount: input.batchCount,
+          sourceTaskId: shouldAttachSource ? composerContext?.sourceTaskId : undefined,
+          sourceAction: shouldAttachSource ? composerContext?.sourceAction : undefined,
+          fork: shouldForkTask ? true : undefined,
+        });
+
+        latestConversation = response.conversation;
+        targetConversationId = response.conversation.id;
+        applyConversation(response.conversation);
+      }
+
+      if (!latestConversation) {
+        return;
+      }
+      const finalConversation = latestConversation;
+
       setSessions((current) => {
-        const next = toConversationSummary(response.conversation);
+        const next = toConversationSummary(finalConversation);
         const withoutExisting = current.filter((item) => item.id !== next.id);
         return [next, ...withoutExisting];
       });
 
-      if (response.conversation.id !== activeId) {
+      if (finalConversation.id !== activeId) {
         if (location.pathname.startsWith("/workspace/")) {
-          navigate(`/workspace/${response.conversation.id}`);
+          navigate(`/workspace/${finalConversation.id}`);
         } else {
-          setFallbackActiveId(response.conversation.id);
+          setFallbackActiveId(finalConversation.id);
         }
       } else {
-        void refreshConversation(response.conversation.id, { silent: true });
+        void refreshConversation(finalConversation.id, { silent: true });
       }
 
       resetComposer();

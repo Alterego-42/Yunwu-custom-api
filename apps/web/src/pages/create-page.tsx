@@ -334,6 +334,7 @@ export function CreatePage() {
   const handleSubmit = useCallback(
     async (input: {
       prompt: string;
+      prompts?: string[];
       model: string;
       capability: CapabilityType;
       assetIds?: string[];
@@ -344,20 +345,40 @@ export function CreatePage() {
       setError(null);
 
       try {
-        const response = await apiClient.createTask({
-          conversationId: sourceTask && !fork ? sourceTask.conversationId : undefined,
-          capability: input.capability,
-          model: input.model,
-          prompt: input.prompt,
-          assetIds: input.assetIds,
-          params: input.params,
-          batchCount: input.batchCount,
-          sourceTaskId: sourceTask?.id,
-          sourceAction: sourceTask ? (fork ? "fork" : mode === "variant" ? "variant" : "edit") : undefined,
-          fork,
-        });
+        const prompts = input.prompts?.length ? input.prompts : [input.prompt];
+        let targetConversationId = sourceTask && !fork ? sourceTask.conversationId : undefined;
+        let lastConversationId: string | undefined;
 
-        navigate(`/workspace/${response.conversation.id}`);
+        for (let index = 0; index < prompts.length; index += 1) {
+          const isFirstTask = index === 0;
+          const shouldForkTask = fork && isFirstTask;
+          const shouldAttachSource = Boolean(sourceTask && (!fork || isFirstTask));
+          const response = await apiClient.createTask({
+            conversationId: shouldForkTask ? undefined : targetConversationId,
+            capability: input.capability,
+            model: input.model,
+            prompt: prompts[index] ?? input.prompt,
+            assetIds: input.assetIds,
+            params: input.params,
+            batchCount: input.batchCount,
+            sourceTaskId: shouldAttachSource ? sourceTask?.id : undefined,
+            sourceAction: shouldAttachSource && sourceTask
+              ? fork
+                ? "fork"
+                : mode === "variant"
+                  ? "variant"
+                  : "edit"
+              : undefined,
+            fork: shouldForkTask,
+          });
+
+          targetConversationId = response.conversation.id;
+          lastConversationId = response.conversation.id;
+        }
+
+        if (lastConversationId) {
+          navigate(`/workspace/${lastConversationId}`);
+        }
       } catch (nextError) {
         setError(getErrorMessage(nextError));
       } finally {

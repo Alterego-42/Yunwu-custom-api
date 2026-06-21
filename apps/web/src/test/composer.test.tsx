@@ -88,6 +88,48 @@ describe("composer upload edit flow", () => {
     );
   });
 
+  it("shows parsed prompt task count and submits prompt arrays", async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <Composer
+        models={[createModel()]}
+        initialDraft={{
+          prompt: '{prompt:"first prompt"},{prompt:"second prompt"}',
+        }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByText(/已解析到 2 个任务/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "发送（2 个任务）" }));
+
+    expect(onSubmit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: "first prompt",
+        prompts: ["first prompt", "second prompt"],
+      }),
+    );
+  });
+
+  it("blocks invalid json-like prompt dispatch input", () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <Composer
+        models={[createModel()]}
+        initialDraft={{
+          prompt: '{text:"missing prompt"}',
+        }}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByText(/未解析到 prompt/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "发送" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("submits the clamped batch count", async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined);
 
