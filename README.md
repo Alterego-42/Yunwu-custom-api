@@ -63,6 +63,12 @@ Electron 桌面壳
 
 数据目录在 `%APPDATA%/yunwu-desktop`，不在程序目录内，更新不会影响数据库与已生成图片。若程序被放在无写入权限的位置（如 `Program Files`），按钮不会出现，卡片会提示手动下载。
 
+对着线上 Release 验证整条更新链路（下载 → 校验 → 解压 → 生成替换脚本，不执行替换）：
+
+```bash
+node apps/desktop/scripts/verify-update-flow.cjs
+```
+
 访问地址（默认端口 3000，被占用时自动改用随机端口）：
 
 - Web / 管理台：`http://127.0.0.1:3000` 与 `http://127.0.0.1:3000/admin`
