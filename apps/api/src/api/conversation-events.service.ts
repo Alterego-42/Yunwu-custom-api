@@ -1,11 +1,4 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from "@nestjs/common";
-import { ConfigService } from "@nestjs/config";
-import IORedis from "ioredis";
+import { Injectable, Logger } from "@nestjs/common";
 import { Observable, fromEventPattern, interval, map, merge } from "rxjs";
 
 export type ConversationEventType =
@@ -36,57 +29,15 @@ interface SseMessage {
 
 type ConversationEventListener = (payload: ConversationEventPayload) => void;
 
+/**
+ * 会话事件广播：API 与任务执行器运行在同一进程内，
+ * 直接用内存监听器分发 SSE 事件，无需 Redis pub/sub。
+ */
 @Injectable()
-export class ConversationEventsService
-  implements OnModuleInit, OnModuleDestroy
-{
+export class ConversationEventsService {
   private readonly logger = new Logger(ConversationEventsService.name);
   private readonly listeners = new Set<ConversationEventListener>();
   private readonly heartbeatIntervalMs = 25_000;
-  private readonly instanceId = Math.random().toString(36).slice(2);
-  private readonly channelName: string;
-  private readonly publisher: IORedis;
-  private readonly subscriber: IORedis;
-  private readonly handlePublisherError =
-    this.createRedisErrorHandler("publisher");
-  private readonly handleSubscriberError =
-    this.createRedisErrorHandler("subscriber");
-
-  constructor(private readonly config: ConfigService) {
-    const redisUrl = this.config.get<string>("redisUrl");
-    if (!redisUrl) {
-      throw new Error("REDIS_URL is required for conversation events.");
-    }
-
-    this.channelName = this.config.get<string>(
-      "tasks.eventsChannel",
-      "yunwu-image-task-events",
-    );
-    this.publisher = new IORedis(redisUrl, {
-      enableReadyCheck: false,
-      maxRetriesPerRequest: null,
-    });
-    this.subscriber = new IORedis(redisUrl, {
-      enableReadyCheck: false,
-      maxRetriesPerRequest: null,
-    });
-  }
-
-  async onModuleInit() {
-    this.publisher.on("error", this.handlePublisherError);
-    this.subscriber.on("error", this.handleSubscriberError);
-    this.subscriber.on("message", this.handleMessage);
-    await this.subscriber.subscribe(this.channelName);
-  }
-
-  async onModuleDestroy() {
-    this.publisher.off("error", this.handlePublisherError);
-    this.subscriber.off("error", this.handleSubscriberError);
-    this.subscriber.off("message", this.handleMessage);
-    await this.subscriber.unsubscribe(this.channelName);
-    this.publisher.disconnect();
-    this.subscriber.disconnect();
-  }
 
   publishTaskUpdated(input: ConversationSignalInput) {
     const updatedAt = new Date().toISOString();
@@ -105,8 +56,8 @@ export class ConversationEventsService
       updatedAt,
     };
 
-    this.publish(payload);
-    this.publish(conversationPayload);
+    this.emit(payload);
+    this.emit(conversationPayload);
   }
 
   createStream(conversationId: string): Observable<SseMessage> {
@@ -158,60 +109,13 @@ export class ConversationEventsService
   }
 
   private emit(payload: ConversationEventPayload) {
-    this.listeners.forEach((listener) => listener(payload));
-  }
-
-  private publish(payload: ConversationEventPayload) {
-    this.emit(payload);
-    void this.publisher
-      .publish(
-        this.channelName,
-        JSON.stringify({
-          sourceId: this.instanceId,
-          payload,
-        }),
-      )
-      .catch((error: unknown) => {
-        const message =
-          error instanceof Error ? error.message : "Unknown publish error";
-        this.logger.error(`Failed to publish conversation event: ${message}`);
-      });
-  }
-
-  private readonly handleMessage = (_channel: string, message: string) => {
-    try {
-      const parsed = JSON.parse(message) as {
-        sourceId?: string;
-        payload?: ConversationEventPayload;
-      };
-
-      if (parsed.sourceId === this.instanceId || !parsed.payload) {
-        return;
+    this.listeners.forEach((listener) => {
+      try {
+        listener(payload);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Conversation event listener failed: ${message}`);
       }
-
-      if (
-        typeof parsed.payload.type !== "string" ||
-        typeof parsed.payload.conversationId !== "string" ||
-        typeof parsed.payload.updatedAt !== "string"
-      ) {
-        return;
-      }
-
-      this.emit(parsed.payload);
-    } catch (error) {
-      const messageText =
-        error instanceof Error ? error.message : "Unknown subscriber error";
-      this.logger.warn(
-        `Ignored invalid conversation event payload: ${messageText}`,
-      );
-    }
-  };
-
-  private createRedisErrorHandler(clientName: "publisher" | "subscriber") {
-    return (error: Error) => {
-      this.logger.error(
-        `Conversation event ${clientName} redis error: ${error.message}`,
-      );
-    };
+    });
   }
 }

@@ -1,6 +1,6 @@
-import type { UserRole as PrismaUserRole } from "@prisma/client";
+import type { UserRole as SharedUserRole } from "@yunwu/shared";
 
-export type UserRole = PrismaUserRole;
+export type UserRole = SharedUserRole;
 
 export interface AuthenticatedUser {
   id: string;

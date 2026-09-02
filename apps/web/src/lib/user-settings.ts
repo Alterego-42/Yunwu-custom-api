@@ -26,6 +26,7 @@ export type UserUiSettings = {
 
 export type UserSettings = {
   baseUrl: string;
+  providerRouteId: ProviderRouteId;
   theme: AppThemeMode;
   themePreset: ThemePresetSettings;
   darkPreset: DarkThemePreset;
@@ -50,18 +51,61 @@ export type ModelCatalogItem = ModelRecord & {
   vendor: string;
 };
 
-export const YUNWU_BASE_URL_OPTIONS = [
+export type ProviderRouteId = "apixo" | "yunwu" | "anyaigc";
+
+/** 三条固定线路：每条线路的 API key 相互独立存储。 */
+export const PROVIDER_ROUTE_OPTIONS = [
   {
-    id: "yunwu-primary",
-    label: "Yunwu 默认线路",
+    id: "apixo",
+    label: "APIXO 线路",
+    value: "https://api.apixo.ai/api/v1",
+  },
+  {
+    id: "yunwu",
+    label: "Yunwu 线路",
     value: "https://yunwu.ai",
   },
   {
-    id: "yunwu-api3",
-    label: "Yunwu API3 线路",
-    value: "https://api3.wlai.vip",
+    id: "anyaigc",
+    label: "AnyAIGC 线路",
+    value: "https://anyaigc.com",
   },
-] as const;
+] as const satisfies ReadonlyArray<{
+  id: ProviderRouteId;
+  label: string;
+  value: string;
+}>;
+
+/** @deprecated 保留旧名，指向新的固定线路列表。 */
+export const YUNWU_BASE_URL_OPTIONS = PROVIDER_ROUTE_OPTIONS;
+
+/** 兼容历史里保存过的各种地址写法，按 host 归属到三条固定线路。 */
+export function providerRouteIdFromBaseUrl(value: unknown): ProviderRouteId {
+  const normalized = typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
+  const match = PROVIDER_ROUTE_OPTIONS.find((option) => option.value === normalized);
+  if (match) {
+    return match.id;
+  }
+
+  let host = "";
+  try {
+    host = new URL(normalized).host.toLowerCase();
+  } catch {
+    host = "";
+  }
+
+  if (host === "yunwu.ai" || host === "api.yunwu.ai" || host === "api3.wlai.vip") {
+    return "yunwu";
+  }
+  if (host === "anyaigc.com" || host === "www.anyaigc.com") {
+    return "anyaigc";
+  }
+  if (host === "api.apixo.ai") {
+    return "apixo";
+  }
+
+  return "apixo";
+}
 
 export const DEFAULT_AVAILABLE_MODEL_IDS = [
   ...DEFAULT_YUNWU_MODEL_IDS,
@@ -302,7 +346,8 @@ function resolveModelVendor(model: YunwuModelDefinition) {
 }
 
 export const DEFAULT_USER_SETTINGS: UserSettings = {
-  baseUrl: YUNWU_BASE_URL_OPTIONS[0].value,
+  baseUrl: PROVIDER_ROUTE_OPTIONS[0].value,
+  providerRouteId: PROVIDER_ROUTE_OPTIONS[0].id as ProviderRouteId,
   theme: "dark",
   themePreset: {
     dark: "ocean",
@@ -339,11 +384,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function normalizeBaseUrl(value: unknown) {
-  if (value === "https://api3.wlai.vip") {
-    return value;
-  }
+  const routeId = providerRouteIdFromBaseUrl(value);
+  return PROVIDER_ROUTE_OPTIONS.find((option) => option.id === routeId)!.value;
+}
 
-  return DEFAULT_USER_SETTINGS.baseUrl;
+function normalizeProviderRouteId(value: unknown, baseUrl: unknown): ProviderRouteId {
+  return PROVIDER_ROUTE_OPTIONS.some((option) => option.id === value)
+    ? (value as ProviderRouteId)
+    : providerRouteIdFromBaseUrl(baseUrl);
 }
 
 function isHexColor(value: unknown): value is string {
@@ -417,6 +465,7 @@ export function normalizeUserSettings(value: unknown): UserSettings {
 
   return {
     baseUrl: normalizeBaseUrl(value.baseUrl),
+    providerRouteId: normalizeProviderRouteId(value.providerRouteId, value.baseUrl),
     theme:
       value.theme === "light" || value.theme === "custom" || value.theme === "dark"
         ? value.theme

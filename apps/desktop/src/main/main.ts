@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
 import log from "electron-log/main";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { fork, spawn, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -12,11 +12,19 @@ import {
   createInitialUpdateStatus,
   defaultReleaseState,
   loadReleaseState,
+  saveReleaseState,
   type ReleaseState,
   type UpdateStatus
 } from "./release-updates";
+import {
+  cleanupStagingDirs,
+  getInstallDir,
+  isInstallDirWritable,
+  launchSwapScript,
+  stageDesktopUpdate
+} from "./desktop-installer";
 
-type Phase = "idle" | "checking" | "starting" | "waiting" | "ready" | "error";
+type Phase = "idle" | "checking" | "migrating" | "starting" | "waiting" | "ready" | "error";
 
 type ServiceStatus = {
   name: string;
@@ -24,55 +32,27 @@ type ServiceStatus = {
   detail?: string;
 };
 
+type LegacyMigrationStatus = {
+  detected: boolean;
+  state: "none" | "running" | "done" | "failed" | "skipped";
+  message?: string;
+};
+
 type DesktopStatus = {
   phase: Phase;
-  dockerCli: "unknown" | "ok" | "missing";
-  dockerDaemon: "unknown" | "ok" | "stopped";
-  dockerAction: "none" | "start" | "install";
   message: string;
   logs: string[];
   services: ServiceStatus[];
   desktopVersion: string;
-  currentImageTag: string;
   webUrl: string;
   adminUrl: string;
   instanceId: string;
-  composeProjectName: string;
+  port: number;
   userDataPath: string;
+  dataPath: string;
   logPath: string;
+  legacy: LegacyMigrationStatus;
 };
-
-function getPortEnv(name: string, fallback: number) {
-  const value = Number.parseInt(process.env[name] ?? "", 10);
-  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
-}
-
-type RuntimePorts = {
-  web: number;
-  api: number;
-};
-
-type RuntimeUrls = {
-  webUrl: string;
-  adminUrl: string;
-  healthUrl: string;
-  readinessUrl: string;
-  webHealthUrl: string;
-};
-
-const preferredPorts = {
-  web: getPortEnv("YUNWU_DESKTOP_WEB_PORT", 5173),
-  api: getPortEnv("YUNWU_DESKTOP_API_PORT", 3000)
-} satisfies RuntimePorts;
-
-let runtimePorts: RuntimePorts = { ...preferredPorts };
-let blockedHostPorts = new Set<number>();
-let runtimeIdentity: RuntimeIdentity | undefined;
-let currentComposeFiles: { envPath: string; overridePath: string } | undefined;
-let isExitingAfterCleanup = false;
-let shutdownCleanupPromise: Promise<void> | undefined;
-let releaseState: ReleaseState = defaultReleaseState(app.getVersion());
-let updateStatus: UpdateStatus = createInitialUpdateStatus(releaseState);
 
 type RuntimeIdentity = {
   instanceId: string;
@@ -80,44 +60,42 @@ type RuntimeIdentity = {
   sessionSecret: string;
 };
 
-function getRuntimeUrls(): RuntimeUrls {
-  const webUrl = `http://127.0.0.1:${runtimePorts.web}`;
-  return {
-    webUrl,
-    adminUrl: `${webUrl}/admin`,
-    healthUrl: `http://127.0.0.1:${runtimePorts.api}/health`,
-    readinessUrl: `http://127.0.0.1:${runtimePorts.api}/readiness`,
-    webHealthUrl: `${webUrl}/health`
-  };
+function getPortEnv(name: string, fallback: number) {
+  const value = Number.parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(value) && value > 0 && value <= 65535 ? value : fallback;
 }
 
+const preferredPort = getPortEnv("YUNWU_DESKTOP_PORT", getPortEnv("YUNWU_DESKTOP_API_PORT", 3000));
+
+let runtimePort = preferredPort;
 let mainWindow: BrowserWindow | undefined;
-let currentProcess: ChildProcessWithoutNullStreams | undefined;
+let serverProcess: ChildProcess | undefined;
+let migrationProcess: ChildProcess | undefined;
+let runtimeIdentity: RuntimeIdentity | undefined;
 let isStarting = false;
+let isMigrating = false;
+let isApplyingUpdate = false;
+let releaseState: ReleaseState = defaultReleaseState(app.getVersion());
+let updateStatus: UpdateStatus = createInitialUpdateStatus(releaseState);
 
 const status: DesktopStatus = {
   phase: "idle",
-  dockerCli: "unknown",
-  dockerDaemon: "unknown",
-  dockerAction: "none",
   message: "准备启动本地服务。",
   logs: [],
   services: [
-    { name: "Docker CLI", status: "pending" },
-    { name: "Docker Daemon", status: "pending" },
-    { name: "Compose Stack", status: "pending" },
+    { name: "内置服务进程", status: "pending" },
     { name: "API /health", status: "pending" },
-    { name: "API /readiness", status: "pending" },
-    { name: "Web /health", status: "pending" }
+    { name: "API /readiness", status: "pending" }
   ],
-  desktopVersion: releaseState.desktopVersion,
-  currentImageTag: releaseState.currentImageTag,
-  webUrl: getRuntimeUrls().webUrl,
-  adminUrl: getRuntimeUrls().adminUrl,
+  desktopVersion: app.getVersion(),
+  webUrl: `http://127.0.0.1:${preferredPort}`,
+  adminUrl: `http://127.0.0.1:${preferredPort}/admin`,
   instanceId: "",
-  composeProjectName: "",
+  port: preferredPort,
   userDataPath: "",
-  logPath: ""
+  dataPath: "",
+  logPath: "",
+  legacy: { detected: false, state: "none" }
 };
 
 function setService(name: string, update: Partial<ServiceStatus>) {
@@ -148,60 +126,135 @@ function broadcastUpdateStatus() {
   mainWindow?.webContents.send("desktop:update-status", updateStatus);
 }
 
-async function clearWorkbenchCache() {
-  const workbenchSession = mainWindow?.webContents.session;
-  if (!workbenchSession) {
-    return;
-  }
-
-  try {
-    await workbenchSession.clearCache();
-    pushLog("Desktop browser HTTP cache cleared before opening workbench.");
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pushLog(`Desktop browser cache clear failed: ${message}`);
-  }
+function updateRuntimeUrls() {
+  status.port = runtimePort;
+  status.webUrl = `http://127.0.0.1:${runtimePort}`;
+  status.adminUrl = `${status.webUrl}/admin`;
+  broadcastStatus();
 }
 
 function getRuntimeDir() {
   return join(app.getPath("userData"), "runtime");
 }
 
-async function ensureRuntimeReleaseState() {
-  const shouldResetUpdateStatus = updateStatus.phase === "unknown";
-  releaseState = await loadReleaseState(getRuntimeDir(), app.getVersion());
-  updateStatus = shouldResetUpdateStatus
-    ? createInitialUpdateStatus(releaseState)
-    : {
-        ...updateStatus,
-        currentDesktopVersion: releaseState.desktopVersion,
-        currentImageTag: releaseState.currentImageTag
-      };
-  status.desktopVersion = releaseState.desktopVersion;
-  status.currentImageTag = releaseState.currentImageTag;
-  broadcastStatus();
-  broadcastUpdateStatus();
-  return releaseState;
+function getDataDir() {
+  return join(app.getPath("userData"), "data");
 }
 
-async function checkDesktopUpdates() {
-  updateStatus = createCheckingUpdateStatus(releaseState);
-  broadcastUpdateStatus();
-  const result = await checkForUpdates(getRuntimeDir(), releaseState);
-  releaseState = result.state;
-  updateStatus = result.status;
-  status.currentImageTag = releaseState.currentImageTag;
-  broadcastStatus();
-  broadcastUpdateStatus();
-  return updateStatus;
+function getUpdateWorkDir() {
+  return join(app.getPath("userData"), "updates");
 }
 
-function runCommand(command: string, args: string[], options: { cwd?: string; timeoutMs?: number } = {}) {
-  return new Promise<{ stdout: string; stderr: string }>((resolvePromise, reject) => {
-    const child = spawn(command, args, {
-      cwd: options.cwd,
-      windowsHide: true
+function getDatabasePath() {
+  return join(getDataDir(), "yunwu.db");
+}
+
+function getStorageDir() {
+  return join(getDataDir(), "storage");
+}
+
+function getMigrationStatePath() {
+  return join(getDataDir(), "legacy-migration.json");
+}
+
+function toFileUrl(path: string) {
+  return `file:${path.replaceAll("\\", "/")}`;
+}
+
+function getResourcePath(...parts: string[]) {
+  const packaged = join(process.resourcesPath, ...parts);
+  if (app.isPackaged && existsSync(packaged)) {
+    return packaged;
+  }
+
+  const repoRoot = resolve(app.getAppPath(), "..", "..");
+  const [first, ...rest] = parts;
+  if (first === "server") {
+    const [target, ...serverRest] = rest;
+    if (target === "api") {
+      return join(repoRoot, "apps", "api", ...serverRest);
+    }
+    if (target === "web") {
+      return join(repoRoot, "apps", "web", "dist", ...serverRest);
+    }
+  }
+  return join(repoRoot, first, ...rest);
+}
+
+function stableHash(value: string) {
+  return createHash("sha256").update(value.toLowerCase()).digest("hex").slice(0, 12);
+}
+
+function sanitizeInstanceId(value: string) {
+  const sanitized = value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return sanitized || "desktop";
+}
+
+async function loadRuntimeIdentity(runtimeDir: string, userData: string): Promise<RuntimeIdentity> {
+  const identityPath = join(runtimeDir, "identity.json");
+  let storedIdentity: Partial<RuntimeIdentity> = {};
+  try {
+    storedIdentity = JSON.parse(await readFile(identityPath, "utf8")) as Partial<RuntimeIdentity>;
+  } catch {
+  }
+
+  const envInstanceId = process.env.YUNWU_INSTANCE_ID;
+  const instanceId = sanitizeInstanceId(
+    envInstanceId && envInstanceId.trim()
+      ? envInstanceId
+      : storedIdentity.instanceId || `desktop${stableHash(userData)}`
+  );
+  const identity = {
+    instanceId,
+    composeProjectName: storedIdentity.composeProjectName || `yunwu-${instanceId}`,
+    sessionSecret: storedIdentity.sessionSecret || randomBytes(32).toString("hex")
+  };
+  await writeFile(identityPath, `${JSON.stringify(identity, null, 2)}\n`, "utf8");
+  return identity;
+}
+
+function checkPort(port: number) {
+  return new Promise<boolean>((resolvePromise) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", () => resolvePromise(false));
+    server.listen({ port, host: "127.0.0.1", exclusive: true }, () => {
+      server.close(() => resolvePromise(true));
     });
+  });
+}
+
+function getEphemeralPort() {
+  return new Promise<number>((resolvePromise, reject) => {
+    const server = createServer();
+    server.unref();
+    server.on("error", reject);
+    server.listen({ port: 0, host: "127.0.0.1", exclusive: true }, () => {
+      const address = server.address();
+      server.close(() => {
+        if (address && typeof address === "object") {
+          resolvePromise(address.port);
+        } else {
+          reject(new Error("Failed to allocate an ephemeral port."));
+        }
+      });
+    });
+  });
+}
+
+async function selectRuntimePort() {
+  if (await checkPort(preferredPort)) {
+    runtimePort = preferredPort;
+  } else {
+    runtimePort = await getEphemeralPort();
+    pushLog(`Preferred port ${preferredPort} is unavailable; selected ${runtimePort}.`);
+  }
+  updateRuntimeUrls();
+}
+
+function runCommand(command: string, args: string[], options: { timeoutMs?: number } = {}) {
+  return new Promise<{ stdout: string; stderr: string }>((resolvePromise, reject) => {
+    const child = spawn(command, args, { windowsHide: true });
     let stdout = "";
     let stderr = "";
     const timeout = options.timeoutMs
@@ -232,593 +285,109 @@ function runCommand(command: string, args: string[], options: { cwd?: string; ti
   });
 }
 
-function getResourcePath(...parts: string[]) {
-  const packaged = join(process.resourcesPath, ...parts);
-  if (app.isPackaged && existsSync(packaged)) {
-    return packaged;
-  }
-
-  const repoRoot = resolve(app.getAppPath(), "..", "..");
-  const fallbackMap: Record<string, string> = {
-    infra: join(repoRoot, "infra"),
-    "app-source": repoRoot
-  };
-  const [first, ...rest] = parts;
-  const fallbackRoot = fallbackMap[first] ?? join(repoRoot, first);
-  return join(fallbackRoot, ...rest);
-}
-
-function stableHash(value: string) {
-  return createHash("sha256").update(value.toLowerCase()).digest("hex").slice(0, 12);
-}
-
-function sanitizeInstanceId(value: string) {
-  const sanitized = value.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return sanitized || "desktop";
-}
-
-async function loadRuntimeIdentity(runtimeDir: string, userData: string): Promise<RuntimeIdentity> {
-  const identityPath = join(runtimeDir, "identity.json");
-  let storedIdentity: Partial<RuntimeIdentity> = {};
-  try {
-    storedIdentity = JSON.parse(await readFile(identityPath, "utf8")) as Partial<RuntimeIdentity>;
-  } catch {
-  }
-
-  const envInstanceId = process.env.YUNWU_INSTANCE_ID;
-  const instanceId = sanitizeInstanceId(
-    envInstanceId && envInstanceId.trim()
-      ? envInstanceId
-      : storedIdentity.instanceId || `desktop${stableHash(userData)}`
-  );
-  const identity = {
-    instanceId,
-    composeProjectName: `yunwu-${instanceId}`,
-    sessionSecret: storedIdentity.sessionSecret || randomBytes(32).toString("hex")
-  };
-  await writeFile(identityPath, `${JSON.stringify(identity, null, 2)}\n`, "utf8");
-  return identity;
-}
-
-function parsePortList(output: string) {
-  const ports = new Set<number>();
-  for (const line of output.split(/\r?\n/)) {
-    const value = Number.parseInt(line.trim(), 10);
-    if (Number.isInteger(value) && value > 0 && value <= 65535) {
-      ports.add(value);
-    }
-  }
-  return ports;
-}
-
-function parseNetstatPorts(output: string) {
-  const ports = new Set<number>();
-  for (const line of output.split(/\r?\n/)) {
-    if (!/\bLISTENING\b/i.test(line)) continue;
-    const match = line.match(/(?:\d{1,3}\.){3}\d{1,3}:(\d+)|\[[^\]]+\]:(\d+)|\*:(\d+)/);
-    const port = Number.parseInt(match?.[1] ?? match?.[2] ?? match?.[3] ?? "", 10);
-    if (Number.isInteger(port) && port > 0 && port <= 65535) {
-      ports.add(port);
-    }
-  }
-  return ports;
-}
-
-function parseNetshExcludedPorts(output: string) {
-  const ports = new Set<number>();
-  for (const line of output.split(/\r?\n/)) {
-    const match = line.trim().match(/^(\d+)\s+(\d+)/);
-    if (!match) continue;
-    const start = Number.parseInt(match[1], 10);
-    const end = Number.parseInt(match[2], 10);
-    if (!Number.isInteger(start) || !Number.isInteger(end)) continue;
-    for (let port = start; port <= end && port <= 65535; port += 1) {
-      ports.add(port);
-    }
-  }
-  return ports;
-}
-
-async function getWindowsUnavailablePorts() {
-  const ports = new Set<number>();
-  if (process.platform !== "win32") {
-    return ports;
-  }
-
-  try {
-    const { stdout } = await runCommand(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "$ErrorActionPreference='SilentlyContinue'; Get-NetTCPConnection | Where-Object { $_.State -in @('Listen','Bound') } | Select-Object -ExpandProperty LocalPort | Sort-Object -Unique"
-      ],
-      { timeoutMs: 8000 }
-    );
-    for (const port of parsePortList(stdout)) ports.add(port);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pushLog(`Get-NetTCPConnection port check failed, falling back to netstat: ${message}`);
-  }
-
-  try {
-    const { stdout } = await runCommand("netstat.exe", ["-ano", "-p", "tcp"], { timeoutMs: 8000 });
-    for (const port of parseNetstatPorts(stdout)) ports.add(port);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pushLog(`netstat port check failed: ${message}`);
-  }
-
-  for (const family of ["ipv4", "ipv6"]) {
-    try {
-      const { stdout } = await runCommand(
-        "netsh.exe",
-        ["interface", family, "show", "excludedportrange", "protocol=tcp"],
-        { timeoutMs: 8000 }
-      );
-      for (const port of parseNetshExcludedPorts(stdout)) ports.add(port);
-    } catch {
-      // Some Windows SKUs return an error for IPv6 or when no exclusions exist.
-    }
-  }
-
-  return ports;
-}
-
-function checkPort(port: number) {
-  return new Promise<boolean>((resolvePromise) => {
-    const server = createServer();
-    server.unref();
-    server.on("error", () => resolvePromise(false));
-    server.listen({ port, host: "0.0.0.0", exclusive: true }, () => {
-      server.close(() => resolvePromise(true));
-    });
-  });
-}
-
-async function isHostPortAvailable(port: number, selectedPorts: Set<number>, unavailablePorts: Set<number>) {
-  if (selectedPorts.has(port) || blockedHostPorts.has(port) || unavailablePorts.has(port)) {
-    return false;
-  }
-
-  return checkPort(port);
-}
-
-async function getEphemeralPort(selectedPorts: Set<number>, unavailablePorts: Set<number>) {
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const port = await new Promise<number>((resolvePromise, reject) => {
-      const server = createServer();
-      server.unref();
-      server.on("error", reject);
-      server.listen({ port: 0, host: "0.0.0.0", exclusive: true }, () => {
-        const address = server.address();
-        server.close(() => {
-          if (address && typeof address === "object") {
-            resolvePromise(address.port);
-          } else {
-            reject(new Error("Failed to allocate an ephemeral port."));
-          }
-        });
-      });
-    });
-
-    if (await isHostPortAvailable(port, selectedPorts, unavailablePorts)) {
-      return port;
-    }
-  }
-
-  throw new Error("Failed to allocate a unique ephemeral port after 20 attempts.");
-}
-
-async function selectPort(name: string, preferredPort: number, selectedPorts: Set<number>, unavailablePorts: Set<number>) {
-  if (await isHostPortAvailable(preferredPort, selectedPorts, unavailablePorts)) {
-    selectedPorts.add(preferredPort);
-    pushLog(`${name} host port selected: ${preferredPort}.`);
-    return preferredPort;
-  }
-
-  const port = await getEphemeralPort(selectedPorts, unavailablePorts);
-  selectedPorts.add(port);
-  pushLog(`${name} preferred host port ${preferredPort} is unavailable; selected ${port}.`);
-  return port;
-}
-
-async function selectRuntimePorts() {
-  setPhase("checking", "正在探测本机可用端口。");
-  const selectedPorts = new Set<number>();
-  const unavailablePorts = await getWindowsUnavailablePorts();
-  if (unavailablePorts.size > 0) {
-    pushLog(`Windows reports ${unavailablePorts.size} TCP ports unavailable; these ports will be avoided.`);
-  }
-  runtimePorts = {
-    web: await selectPort("Web", preferredPorts.web, selectedPorts, unavailablePorts),
-    api: await selectPort("API", preferredPorts.api, selectedPorts, unavailablePorts)
-  };
-
-  const urls = getRuntimeUrls();
-  status.webUrl = urls.webUrl;
-  status.adminUrl = urls.adminUrl;
-  broadcastStatus();
-}
-
-async function writeRuntimeFiles() {
-  const userData = app.getPath("userData");
-  const runtimeDir = getRuntimeDir();
-  await mkdir(runtimeDir, { recursive: true });
-  const currentReleaseState = await ensureRuntimeReleaseState();
-  runtimeIdentity = await loadRuntimeIdentity(runtimeDir, userData);
-
-  const envPath = join(runtimeDir, ".env");
-  const overridePath = join(runtimeDir, "docker-compose.override.yml");
-  const appSourceDir = (process.env.YUNWU_DESKTOP_APP_SOURCE_DIR ?? getResourcePath("app-source")).replaceAll("\\", "/");
-
-  const env = [
-    `YUNWU_INSTANCE_ID=${runtimeIdentity.instanceId}`,
-    `COMPOSE_PROJECT_NAME=${runtimeIdentity.composeProjectName}`,
-    "NODE_ENV=production",
-    `PORT=${runtimePorts.api}`,
-    `WEB_PORT=${runtimePorts.web}`,
-    "POSTGRES_DB=yunwu_platform",
-    "POSTGRES_USER=postgres",
-    "POSTGRES_PASSWORD=postgres",
-    "MINIO_ROOT_USER=minioadmin",
-    "MINIO_ROOT_PASSWORD=minioadmin",
-    "MINIO_BUCKET=yunwu-assets",
-    "MINIO_USE_SSL=false",
-    "TASK_QUEUE_NAME=yunwu-image-tasks",
-    "TASK_BATCH_QUEUE_NAME=yunwu-image-batch-tasks",
-    "TASK_WORKER_ENABLED=true",
-    "TASK_WORKER_CONCURRENCY=50",
-    "TASK_BATCH_WORKER_CONCURRENCY=2",
-    "YUNWU_BASE_URL=https://yunwu.ai",
-    "YUNWU_API_KEY=",
-    "AUTH_ADMIN_EMAIL=admin@yunwu.local",
-    "AUTH_ADMIN_PASSWORD=admin123456",
-    "AUTH_ADMIN_DISPLAY_NAME=Administrator",
-    "AUTH_DEMO_EMAIL=demo@yunwu.local",
-    "AUTH_DEMO_PASSWORD=demo123456",
-    "AUTH_DEMO_DISPLAY_NAME=Demo User",
-    `AUTH_SESSION_SECRET=${runtimeIdentity.sessionSecret}`,
-    `AUTH_COOKIE_NAME=yunwu_session_${runtimeIdentity.instanceId}`,
-    "AUTH_SESSION_TTL_HOURS=168",
-    "AUTH_COOKIE_SECURE=false",
-    `CORS_ORIGIN=http://127.0.0.1:${runtimePorts.web},http://localhost:${runtimePorts.web}`,
-    `WEB_ORIGIN=http://127.0.0.1:${runtimePorts.web}`,
-    `MINIO_PUBLIC_BASE_URL=http://127.0.0.1:${runtimePorts.web}/api/assets`,
-    "YUNWU_IMAGE_REGISTRY=ghcr.io/alterego-42",
-    `YUNWU_IMAGE_TAG=${currentReleaseState.currentImageTag}`,
-    `DESKTOP_APP_SOURCE_DIR=${appSourceDir}`
-  ].join("\n");
-
-  const override = [
-    "services:",
-    "  api:",
-    "    labels:",
-    "      ai.yunwu.desktop.runtime: \"true\"",
-    "  web:",
-    "    labels:",
-    "      ai.yunwu.desktop.runtime: \"true\"",
-    "  worker:",
-    "    labels:",
-    "      ai.yunwu.desktop.runtime: \"true\""
-  ].join("\n");
-
-  await writeFile(envPath, `${env}\n`, "utf8");
-  await writeFile(overridePath, `${override}\n`, "utf8");
-
-  status.userDataPath = userData;
-  status.instanceId = runtimeIdentity.instanceId;
-  status.composeProjectName = runtimeIdentity.composeProjectName;
-  status.logPath = log.transports.file.getFile().path;
-  currentComposeFiles = { envPath, overridePath };
-  return { envPath, overridePath };
-}
-
-function getDockerDesktopCandidates() {
-  return [
-    process.env["ProgramFiles"] ? join(process.env["ProgramFiles"], "Docker", "Docker", "Docker Desktop.exe") : "",
-    process.env["ProgramFiles(x86)"] ? join(process.env["ProgramFiles(x86)"], "Docker", "Docker", "Docker Desktop.exe") : "",
-    process.env["LocalAppData"] ? join(process.env["LocalAppData"], "Docker", "Docker Desktop.exe") : ""
-  ].filter(Boolean);
-}
-
-const dockerDesktopDownloadUrl = "https://www.docker.com/products/docker-desktop/";
-
-async function tryStartDockerDesktop() {
-  for (const candidate of getDockerDesktopCandidates()) {
-    if (!existsSync(candidate)) continue;
-    pushLog(`Starting Docker Desktop from ${candidate}.`);
-    spawn(candidate, [], {
-      detached: true,
-      windowsHide: true,
-      stdio: "ignore"
-    }).unref();
-    return true;
-  }
-
-  return false;
-}
-
-async function waitForDockerDaemon(maxWaitMs = 120_000) {
-  const deadline = Date.now() + maxWaitMs;
-  while (Date.now() < deadline) {
-    try {
-      await runCommand("docker", ["info"], { timeoutMs: 10000 });
-      return true;
-    } catch {
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 5000));
-    }
-  }
-
-  return false;
-}
-
-async function checkDocker() {
-  setPhase("checking", "正在检测 Docker。");
-  status.dockerAction = "none";
-  try {
-    await runCommand("docker", ["--version"], { timeoutMs: 8000 });
-    status.dockerCli = "ok";
-    setService("Docker CLI", { status: "healthy", detail: "docker 命令可用" });
-    pushLog("Docker CLI is available.");
-  } catch (error) {
-    status.dockerCli = "missing";
-    status.dockerAction = "install";
-    setService("Docker CLI", {
-      status: "error",
-      detail: "未找到 docker 命令。请点击下载/安装 Docker Desktop，安装后重试。也可执行：winget install Docker.DockerDesktop"
-    });
-    broadcastStatus();
-    throw error;
-  }
-
-  try {
-    await runCommand("docker", ["info"], { timeoutMs: 10000 });
-    status.dockerDaemon = "ok";
-    setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
-    pushLog("Docker daemon is reachable.");
-    return;
-  } catch {
-    status.dockerDaemon = "stopped";
-    status.dockerAction = "start";
-    setService("Docker Daemon", {
-      status: "running",
-      detail: "Docker daemon 未启动，正在尝试自动启动 Docker Desktop。"
-    });
-    broadcastStatus();
-  }
-
-  const started = await tryStartDockerDesktop();
-  if (!started) {
-    setService("Docker Daemon", {
-      status: "error",
-      detail: "未找到 Docker Desktop 可执行文件。请点击下载/安装 Docker Desktop。"
-    });
-    broadcastStatus();
-    throw new Error("Docker Desktop executable not found.");
-  }
-
-  const ready = await waitForDockerDaemon();
-  if (!ready) {
-    setService("Docker Daemon", {
-      status: "error",
-      detail: "Docker Desktop 已启动尝试，但 daemon 仍未就绪，请手动确认 Docker Desktop 已完成启动后重试。"
-    });
-    broadcastStatus();
-    throw new Error("Docker daemon did not become ready in time.");
-  }
-
-  status.dockerAction = "none";
-  status.dockerDaemon = "ok";
-  setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
-  pushLog("Docker daemon became reachable after auto-start.");
-}
-
-async function openDockerInstallGuide() {
-  pushLog("Opening Docker Desktop download page.");
-  await shell.openExternal(dockerDesktopDownloadUrl);
-}
-
-async function startDockerDesktopFromUi() {
-  const started = await tryStartDockerDesktop();
-  if (!started) {
-    await openDockerInstallGuide();
-    return;
-  }
-
-  setService("Docker Daemon", {
-    status: "running",
-    detail: "已请求启动 Docker Desktop，正在等待 daemon 就绪。"
-  });
-  broadcastStatus();
-  const ready = await waitForDockerDaemon();
-  if (!ready) {
-    throw new Error("Docker daemon did not become ready in time.");
-  }
-  status.dockerDaemon = "ok";
-  status.dockerAction = "none";
-  setService("Docker Daemon", { status: "healthy", detail: "Docker daemon 已启动" });
-  broadcastStatus();
-}
-
-function shouldBuildImages() {
-  return !app.isPackaged || process.env.YUNWU_DESKTOP_BUILD === "1";
-}
-
-function isPortAllocatedMessage(message: string) {
-  return /port is already allocated|bind:|Ports are not available/i.test(message);
-}
-
-function isImagePullNetworkError(message: string) {
-  return /\bEOF\b|unexpected EOF|Client\.Timeout|TLS handshake timeout|i\/o timeout|context deadline exceeded|connection reset|failed to do request|httpReadSeeker|network is unreachable|no route to host|proxyconnect tcp|temporary failure/i.test(
-    message
-  );
-}
-
-function getImagePullNetworkHint() {
-  return "Docker 镜像拉取失败：网络连接在访问 GHCR/Docker Hub 时中断。请检查 Docker Desktop 的网络和代理设置；如使用代理，请在 Docker Desktop 设置中配置 HTTP/HTTPS Proxy 后点击重试。";
-}
-
 function delay(ms: number) {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 
-function runComposeProcess(args: string[], detail: string) {
-  return new Promise<void>((resolvePromise, reject) => {
-    pushLog(`Running docker ${args.join(" ")}`);
-    setService("Compose Stack", { status: "running", detail });
-    currentProcess = spawn("docker", args, { windowsHide: true });
-    let output = "";
+// ---------------------------------------------------------------------------
+// 内置服务进程
+// ---------------------------------------------------------------------------
 
-    currentProcess.stdout.on("data", (chunk) => {
-      const line = chunk.toString().trim();
-      output += `${line}\n`;
-      pushLog(line);
-    });
-    currentProcess.stderr.on("data", (chunk) => {
-      const line = chunk.toString().trim();
-      output += `${line}\n`;
-      pushLog(line);
-      if (isPortAllocatedMessage(line)) {
-        setService("Compose Stack", { status: "error", detail: "端口冲突：将重新探测端口并重试；如仍失败，请点击重试。" });
-      }
-    });
-    currentProcess.on("error", reject);
-    currentProcess.on("close", (code) => {
-      currentProcess = undefined;
-      if (code === 0) {
-        setService("Compose Stack", { status: "healthy", detail: "Compose 服务栈已启动" });
-        resolvePromise();
-      } else {
-        reject(new Error(`docker compose exited with ${code}.\n${output}`));
-      }
-    });
+function getServerEntry() {
+  return getResourcePath("server", "api", "dist", "main.js");
+}
+
+function getWebDistDir() {
+  return getResourcePath("server", "web");
+}
+
+function buildServerEnv(identity: RuntimeIdentity): Record<string, string> {
+  const origin = `http://127.0.0.1:${runtimePort},http://localhost:${runtimePort}`;
+  return {
+    NODE_ENV: "production",
+    PORT: String(runtimePort),
+    // 桌面端服务只对本机提供，避免监听全部网卡。
+    HOST: "127.0.0.1",
+    DATABASE_URL: toFileUrl(getDatabasePath()),
+    RUN_MIGRATIONS_ON_BOOT: "true",
+    STORAGE_MODE: "local",
+    LOCAL_STORAGE_PATH: getStorageDir(),
+    WEB_DIST_DIR: getWebDistDir(),
+    TASK_WORKER_ENABLED: "true",
+    TASK_WORKER_CONCURRENCY: process.env.YUNWU_TASK_CONCURRENCY ?? "50",
+    TASK_BATCH_WORKER_CONCURRENCY: process.env.YUNWU_BATCH_CONCURRENCY ?? "2",
+    PROVIDER_TYPE: process.env.PROVIDER_TYPE ?? "apixo",
+    APIXO_BASE_URL: process.env.APIXO_BASE_URL ?? "https://api.apixo.ai/api/v1",
+    APIXO_API_KEY: process.env.APIXO_API_KEY ?? "",
+    YUNWU_BASE_URL: process.env.YUNWU_BASE_URL ?? "https://yunwu.ai",
+    YUNWU_API_KEY: process.env.YUNWU_API_KEY ?? "",
+    AUTH_ADMIN_EMAIL: "admin@yunwu.local",
+    AUTH_ADMIN_PASSWORD: "admin123456",
+    AUTH_ADMIN_DISPLAY_NAME: "Administrator",
+    AUTH_DEMO_EMAIL: "demo@yunwu.local",
+    AUTH_DEMO_PASSWORD: "demo123456",
+    AUTH_DEMO_DISPLAY_NAME: "Demo User",
+    AUTH_SESSION_SECRET: identity.sessionSecret,
+    AUTH_COOKIE_NAME: `yunwu_session_${identity.instanceId}`,
+    AUTH_SESSION_TTL_HOURS: "168",
+    AUTH_COOKIE_SECURE: "false",
+    CORS_ORIGIN: origin,
+    WEB_ORIGIN: `http://127.0.0.1:${runtimePort}`
+  };
+}
+
+function stopServer() {
+  if (serverProcess) {
+    try {
+      serverProcess.kill();
+    } catch {
+    }
+    serverProcess = undefined;
+  }
+}
+
+async function startServer(identity: RuntimeIdentity) {
+  const entry = getServerEntry();
+  if (!existsSync(entry)) {
+    throw new Error(`未找到内置服务入口：${entry}。开发模式请先执行 pnpm --filter @yunwu/api build。`);
+  }
+
+  setService("内置服务进程", { status: "running", detail: "正在启动内置 Node 服务。" });
+  // 用 ELECTRON_RUN_AS_NODE 起纯 Node 子进程，而不是 utilityProcess：
+  // utilityProcess 会初始化 Chromium 网络栈，在 Winsock LSP 被第三方软件
+  // （VPN/杀软）改坏的机器上创建监听套接字会直接失败（listen UNKNOWN），
+  // 同一台机器上纯 Node 模式绑定正常。
+  const child = fork(entry, [], {
+    env: { ...buildServerEnv(identity), ELECTRON_RUN_AS_NODE: "1" },
+    execPath: process.execPath,
+    stdio: ["ignore", "pipe", "pipe", "ipc"]
   });
-}
+  serverProcess = child;
 
-async function runComposeProcessWithNetworkRetry(args: string[], detail: string, maxAttempts = 3) {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      const attemptDetail = maxAttempts > 1 ? `${detail}（第 ${attempt}/${maxAttempts} 次）` : detail;
-      await runComposeProcess(args, attemptDetail);
-      return;
-    } catch (error) {
-      lastError = error;
-      const message = error instanceof Error ? error.message : String(error);
-      if (attempt >= maxAttempts || !isImagePullNetworkError(message)) {
-        throw error;
-      }
-
-      const waitMs = attempt * 8000;
-      pushLog(`Docker image pull network error; retrying in ${Math.round(waitMs / 1000)} seconds.`);
-      setService("Compose Stack", {
-        status: "running",
-        detail: "镜像拉取网络中断，正在自动重试。"
-      });
-      await delay(waitMs);
-    }
-  }
-
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
-async function startCompose(envPath: string, overridePath: string) {
-  const infraCompose = getResourcePath("infra", "docker-compose.yml");
-  const desktopCompose = getResourcePath("infra", "docker-compose.desktop.yml");
-  const composeFiles = ["--env-file", envPath, "-f", infraCompose, "-f", desktopCompose, "-f", overridePath];
-  const buildImages = shouldBuildImages();
-
-  if (!buildImages) {
-    const pullServices = ["postgres", "redis", "minio", "minio-init", "api", "worker", "web"];
-    for (const service of pullServices) {
-      try {
-        await runComposeProcessWithNetworkRetry(
-          ["compose", ...composeFiles, "pull", service],
-          `正在拉取 ${service} 镜像，若本机已有镜像则可失败继续。`
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        pushLog(`docker compose pull ${service} failed, continuing with local images: ${message}`);
+  child.stdout?.on("data", (chunk) => {
+    const line = chunk.toString().trim();
+    if (line) pushLog(`[server] ${line}`);
+  });
+  child.stderr?.on("data", (chunk) => {
+    const line = chunk.toString().trim();
+    if (line) pushLog(`[server] ${line}`);
+  });
+  child.on("exit", (code) => {
+    if (serverProcess === child) {
+      serverProcess = undefined;
+      if (status.phase !== "error" && !isStarting) {
+        setService("内置服务进程", { status: "error", detail: `服务进程退出（code=${code}）。` });
+        setPhase("error", "内置服务进程意外退出，请点击重试。");
       }
     }
-  }
+  });
 
-  try {
-    await runComposeProcess(
-      ["compose", ...composeFiles, "rm", "-f", "-s", "minio-init"],
-      "正在清理可能残留的 minio-init 失败容器，以便重新执行初始化。"
-    );
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    pushLog(`docker compose rm minio-init skipped: ${message}`);
-  }
-
-  const upArgs = ["compose", ...composeFiles, "up", "-d"];
-  if (buildImages) {
-    upArgs.push("--build");
-  }
-
-  await runComposeProcessWithNetworkRetry(
-    upArgs,
-    buildImages ? "开发/显式构建模式：正在执行 docker compose up -d --build" : "正在执行 docker compose up -d"
-  );
-}
-
-async function stopCompose() {
-  if (!currentComposeFiles) {
-    log.info("Desktop compose shutdown skipped: runtime compose files are not available.");
-    return;
-  }
-
-  const infraCompose = getResourcePath("infra", "docker-compose.yml");
-  const desktopCompose = getResourcePath("infra", "docker-compose.desktop.yml");
-  const composeFiles = [
-    "--env-file",
-    currentComposeFiles.envPath,
-    "-f",
-    infraCompose,
-    "-f",
-    desktopCompose,
-    "-f",
-    currentComposeFiles.overridePath
-  ];
-  log.info(`Desktop compose shutdown started for env ${currentComposeFiles.envPath}.`);
-  await runComposeProcess(["compose", ...composeFiles, "down"], "正在关闭当前桌面实例服务栈，保留数据卷。");
-  log.info("Desktop compose shutdown completed successfully.");
-}
-
-function performShutdownCleanup(reason: string) {
-  if (shutdownCleanupPromise) {
-    log.info(`Desktop shutdown cleanup already running; joined by ${reason}.`);
-    return shutdownCleanupPromise;
-  }
-
-  shutdownCleanupPromise = (async () => {
-    log.info(`Desktop shutdown cleanup started by ${reason}.`);
-    if (currentProcess) {
-      log.info("Stopping active docker compose command before shutdown cleanup.");
-      currentProcess.kill();
-      currentProcess = undefined;
-    }
-
-    try {
-      await stopCompose();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log.error(`Desktop compose shutdown failed: ${message}`);
-      throw error;
-    }
-  })();
-
-  return shutdownCleanupPromise;
+  setService("内置服务进程", { status: "healthy", detail: "服务进程已启动" });
 }
 
 async function probe(url: string) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3000);
+  const timeout = setTimeout(() => controller.abort(), 2000);
   try {
     const response = await fetch(url, { signal: controller.signal });
     return response.ok;
@@ -827,15 +396,13 @@ async function probe(url: string) {
   }
 }
 
-async function waitForHealth() {
+async function waitForHealth(maxWaitMs = 60_000) {
   setPhase("waiting", "服务启动中，正在等待健康检查。");
-  const urls = getRuntimeUrls();
   const checks = [
-    { name: "API /health", url: urls.healthUrl },
-    { name: "API /readiness", url: urls.readinessUrl },
-    { name: "Web /health", url: urls.webHealthUrl }
+    { name: "API /health", url: `http://127.0.0.1:${runtimePort}/health` },
+    { name: "API /readiness", url: `http://127.0.0.1:${runtimePort}/readiness` }
   ];
-  const deadline = Date.now() + 180_000;
+  const deadline = Date.now() + maxWaitMs;
 
   while (Date.now() < deadline) {
     let allHealthy = true;
@@ -860,7 +427,7 @@ async function waitForHealth() {
       pushLog("All health checks passed.");
       return;
     }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 3000));
+    await delay(500);
   }
 
   for (const check of checks) {
@@ -869,51 +436,492 @@ async function waitForHealth() {
       setService(check.name, { status: "error", detail: "健康检查超时，请查看日志后重试。" });
     }
   }
-  throw new Error("Health check timed out after 180 seconds.");
+  throw new Error(`Health check timed out after ${Math.round(maxWaitMs / 1000)} seconds.`);
+}
+
+// ---------------------------------------------------------------------------
+// v0.6.1 旧数据迁移（Docker 卷 → SQLite/本地存储）
+// ---------------------------------------------------------------------------
+
+type MigrationState = {
+  status: "done" | "failed" | "skipped";
+  at: string;
+  message?: string;
+};
+
+async function readMigrationState(): Promise<MigrationState | undefined> {
+  try {
+    return JSON.parse(await readFile(getMigrationStatePath(), "utf8")) as MigrationState;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeMigrationState(state: MigrationState) {
+  await mkdir(getDataDir(), { recursive: true });
+  await writeFile(getMigrationStatePath(), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+async function dockerVolumeExists(name: string) {
+  try {
+    await runCommand("docker", ["volume", "inspect", name], { timeoutMs: 8000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function detectLegacyData(identity: RuntimeIdentity) {
+  try {
+    await runCommand("docker", ["info"], { timeoutMs: 6000 });
+  } catch {
+    return { available: false as const, reason: "Docker daemon 不可用" };
+  }
+
+  const volumeName = `${identity.composeProjectName}_postgres_data`;
+  if (!(await dockerVolumeExists(volumeName))) {
+    return { available: false as const, reason: "未发现旧版本数据卷" };
+  }
+
+  return {
+    available: true as const,
+    postgresVolume: volumeName,
+    minioVolume: `${identity.composeProjectName}_minio_data`
+  };
+}
+
+async function removeContainer(name: string) {
+  try {
+    await runCommand("docker", ["rm", "-f", name], { timeoutMs: 20_000 });
+  } catch {
+  }
+}
+
+async function runLegacyImport(env: Record<string, string>) {
+  const entry = getResourcePath("server", "api", "dist", "tools", "legacy-import.js");
+  if (!existsSync(entry)) {
+    throw new Error(`未找到迁移工具：${entry}`);
+  }
+
+  await new Promise<void>((resolvePromise, reject) => {
+    // 与内置服务同理：迁移工具要连旧 Postgres/MinIO，同样走纯 Node 子进程。
+    const child = fork(entry, [], {
+      env: { ...env, ELECTRON_RUN_AS_NODE: "1" },
+      execPath: process.execPath,
+      stdio: ["ignore", "pipe", "pipe", "ipc"]
+    });
+    migrationProcess = child;
+    let lastError = "";
+
+    const handleChunk = (chunk: Buffer) => {
+      for (const rawLine of chunk.toString().split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const parsed = JSON.parse(line) as { level?: string; message?: string };
+          if (parsed.message) {
+            if (parsed.level === "error") lastError = parsed.message;
+            pushLog(`[migrate] ${parsed.message}`);
+            continue;
+          }
+        } catch {
+        }
+        pushLog(`[migrate] ${line}`);
+      }
+    };
+
+    child.stdout?.on("data", handleChunk);
+    child.stderr?.on("data", handleChunk);
+    child.on("exit", (code) => {
+      migrationProcess = undefined;
+      if (code === 0) {
+        resolvePromise();
+      } else {
+        reject(new Error(lastError || `迁移进程退出（code=${code}）。`));
+      }
+    });
+  });
+}
+
+async function migrateLegacyData(identity: RuntimeIdentity, options: { forceWipe: boolean }) {
+  const detection = await detectLegacyData(identity);
+  if (!detection.available) {
+    throw new Error(`无法访问旧数据：${detection.reason}。请确认 Docker Desktop 已启动。`);
+  }
+
+  const suffix = Date.now().toString(36);
+  const pgContainer = `yunwu-legacy-pg-${suffix}`;
+  const minioContainer = `yunwu-legacy-minio-${suffix}`;
+  const pgPort = await getEphemeralPort();
+  const hasMinio = await dockerVolumeExists(detection.minioVolume);
+  const minioPort = hasMinio ? await getEphemeralPort() : 0;
+
+  setService("旧数据迁移", { status: "running", detail: "正在启动临时数据库容器读取旧数据。" });
+  pushLog(`Starting temporary postgres container on port ${pgPort}.`);
+
+  try {
+    await runCommand(
+      "docker",
+      [
+        "run", "-d", "--name", pgContainer,
+        "-p", `127.0.0.1:${pgPort}:5432`,
+        "-v", `${detection.postgresVolume}:/var/lib/postgresql/data`,
+        "postgres:16-alpine"
+      ],
+      { timeoutMs: 120_000 }
+    );
+
+    let pgReady = false;
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      try {
+        await runCommand(
+          "docker",
+          ["exec", pgContainer, "pg_isready", "-U", "postgres", "-d", "yunwu_platform"],
+          { timeoutMs: 5000 }
+        );
+        pgReady = true;
+        break;
+      } catch {
+        await delay(1000);
+      }
+    }
+    if (!pgReady) {
+      throw new Error("旧数据库容器未在 60 秒内就绪。");
+    }
+
+    if (hasMinio) {
+      pushLog(`Starting temporary minio container on port ${minioPort}.`);
+      await runCommand(
+        "docker",
+        [
+          "run", "-d", "--name", minioContainer,
+          "-p", `127.0.0.1:${minioPort}:9000`,
+          "-v", `${detection.minioVolume}:/data`,
+          "-e", "MINIO_ROOT_USER=minioadmin",
+          "-e", "MINIO_ROOT_PASSWORD=minioadmin",
+          "minio/minio:RELEASE.2025-09-07T16-13-09Z-cpuv1",
+          "server", "/data"
+        ],
+        { timeoutMs: 120_000 }
+      );
+      let minioReady = false;
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        try {
+          if (await probe(`http://127.0.0.1:${minioPort}/minio/health/live`)) {
+            minioReady = true;
+            break;
+          }
+        } catch {
+        }
+        await delay(1000);
+      }
+      if (!minioReady) {
+        pushLog("MinIO container did not become ready; object import will be skipped.");
+      }
+    }
+
+    const env: Record<string, string> = {
+      LEGACY_DATABASE_URL: `postgresql://postgres:postgres@127.0.0.1:${pgPort}/yunwu_platform`,
+      DATABASE_URL: toFileUrl(getDatabasePath()),
+      LOCAL_STORAGE_PATH: getStorageDir(),
+      FORCE_WIPE: options.forceWipe ? "true" : "false"
+    };
+    if (hasMinio) {
+      env.LEGACY_MINIO_ENDPOINT = "127.0.0.1";
+      env.LEGACY_MINIO_PORT = String(minioPort);
+      env.LEGACY_MINIO_ACCESS_KEY = "minioadmin";
+      env.LEGACY_MINIO_SECRET_KEY = "minioadmin";
+      env.LEGACY_MINIO_BUCKET = "yunwu-assets";
+    }
+
+    await runLegacyImport(env);
+    setService("旧数据迁移", { status: "healthy", detail: "旧数据迁移完成。" });
+  } finally {
+    await removeContainer(pgContainer);
+    if (hasMinio) {
+      await removeContainer(minioContainer);
+    }
+  }
+}
+
+async function maybeAutoMigrate(identity: RuntimeIdentity) {
+  const state = await readMigrationState();
+  if (state) {
+    status.legacy = {
+      detected: state.status !== "done" && state.status !== "skipped",
+      state: state.status === "done" ? "done" : state.status === "failed" ? "failed" : "skipped",
+      message: state.message
+    };
+    return;
+  }
+
+  const databaseExists = existsSync(getDatabasePath());
+  const detection = await detectLegacyData(identity);
+  if (!detection.available) {
+    // Docker 不可用或没有旧数据：不写状态文件，之后启动仍会轻量探测一次
+    status.legacy = { detected: false, state: "none", message: detection.reason };
+    pushLog(`Legacy data auto-migration skipped: ${detection.reason}.`);
+    return;
+  }
+
+  status.legacy = { detected: true, state: "none" };
+  if (databaseExists) {
+    status.legacy.message = "检测到旧版本数据。当前数据库已有内容，可在下方手动触发迁移（将覆盖现有数据）。";
+    pushLog("Legacy volumes detected but local database already exists; manual migration available.");
+    broadcastStatus();
+    return;
+  }
+
+  setPhase("migrating", "检测到 v0.6.x 旧数据，正在自动迁移到轻量存储。");
+  status.services.push({ name: "旧数据迁移", status: "running" });
+  isMigrating = true;
+  try {
+    await migrateLegacyData(identity, { forceWipe: false });
+    await writeMigrationState({ status: "done", at: new Date().toISOString() });
+    status.legacy = { detected: true, state: "done", message: "旧数据迁移完成。" };
+    pushLog("Legacy data migration completed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await writeMigrationState({ status: "failed", at: new Date().toISOString(), message });
+    status.legacy = { detected: true, state: "failed", message };
+    setService("旧数据迁移", { status: "error", detail: message });
+    pushLog(`Legacy data migration failed: ${message}`);
+  } finally {
+    isMigrating = false;
+  }
+}
+
+async function manualMigrateLegacy() {
+  if (isMigrating || isStarting) {
+    throw new Error("当前有任务进行中，请稍后再试。");
+  }
+
+  const identity = runtimeIdentity;
+  if (!identity) {
+    throw new Error("运行时尚未初始化。");
+  }
+
+  isMigrating = true;
+  const hadService = status.services.some((item) => item.name === "旧数据迁移");
+  if (!hadService) {
+    status.services.push({ name: "旧数据迁移", status: "running" });
+  } else {
+    setService("旧数据迁移", { status: "running", detail: undefined });
+  }
+  setPhase("migrating", "正在从旧版本导入数据（将覆盖当前数据库）。");
+
+  try {
+    stopServer();
+    await delay(1000);
+    await migrateLegacyData(identity, { forceWipe: true });
+    await writeMigrationState({ status: "done", at: new Date().toISOString() });
+    status.legacy = { detected: true, state: "done", message: "旧数据迁移完成。" };
+    pushLog("Manual legacy migration completed.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    status.legacy = { detected: true, state: "failed", message };
+    setService("旧数据迁移", { status: "error", detail: message });
+    pushLog(`Manual legacy migration failed: ${message}`);
+  } finally {
+    isMigrating = false;
+  }
+
+  void startStack();
+}
+
+// ---------------------------------------------------------------------------
+// 启动编排
+// ---------------------------------------------------------------------------
+
+async function clearWorkbenchCache() {
+  const workbenchSession = mainWindow?.webContents.session;
+  if (!workbenchSession) {
+    return;
+  }
+
+  try {
+    await workbenchSession.clearCache();
+    pushLog("Desktop browser HTTP cache cleared before opening workbench.");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`Desktop browser cache clear failed: ${message}`);
+  }
+}
+
+async function ensureRuntimeReleaseState() {
+  const shouldResetUpdateStatus = updateStatus.phase === "unknown";
+  releaseState = await loadReleaseState(getRuntimeDir(), app.getVersion());
+  updateStatus = shouldResetUpdateStatus
+    ? createInitialUpdateStatus(releaseState)
+    : {
+        ...updateStatus,
+        currentDesktopVersion: releaseState.desktopVersion,
+        currentImageTag: releaseState.currentImageTag
+      };
+  status.desktopVersion = releaseState.desktopVersion;
+  broadcastStatus();
+  broadcastUpdateStatus();
+  return releaseState;
+}
+
+async function checkDesktopUpdates() {
+  updateStatus = createCheckingUpdateStatus(releaseState);
+  broadcastUpdateStatus();
+  const result = await checkForUpdates(getRuntimeDir(), releaseState);
+  releaseState = result.state;
+  updateStatus = await withInstallability(result.status);
+  broadcastStatus();
+  broadcastUpdateStatus();
+  return updateStatus;
+}
+
+/**
+ * 端内更新还要求安装目录可写：portable 包被解压到 Program Files
+ * 之类的位置时只能提示手动下载。
+ */
+async function withInstallability(status: UpdateStatus): Promise<UpdateStatus> {
+  if (!status.canApplyDesktopUpdate || !status.portableAsset) {
+    return status;
+  }
+
+  const installDir = getInstallDir(app.getPath("exe"));
+  if (await isInstallDirWritable(installDir)) {
+    return status;
+  }
+
+  return {
+    ...status,
+    canApplyDesktopUpdate: false,
+    message: `${status.message}（当前安装目录不可写，请手动下载新版本）`
+  };
+}
+
+async function applyDesktopUpdate() {
+  const asset = updateStatus.portableAsset ?? releaseState.lastPortableAsset ?? undefined;
+  const version = updateStatus.latestVersion ?? releaseState.lastKnownLatest?.version;
+
+  if (!asset || !version) {
+    updateStatus = {
+      ...updateStatus,
+      phase: "error",
+      error: "没有可用的更新包信息。",
+      message: "没有可用的更新包信息，请先检查更新。"
+    };
+    broadcastUpdateStatus();
+    return updateStatus;
+  }
+
+  if (isApplyingUpdate) {
+    return updateStatus;
+  }
+  isApplyingUpdate = true;
+
+  updateStatus = {
+    ...updateStatus,
+    phase: "applying",
+    stage: "download",
+    message: "正在准备更新。"
+  };
+  broadcastUpdateStatus();
+
+  try {
+    await cleanupStagingDirs(getUpdateWorkDir());
+    const staged = await stageDesktopUpdate({
+      asset,
+      version,
+      exePath: app.getPath("exe"),
+      workDir: getUpdateWorkDir(),
+      onProgress: (progress) => {
+        updateStatus = {
+          ...updateStatus,
+          phase: "applying",
+          stage: progress.stage,
+          ...(progress.downloadedBytes === undefined
+            ? {}
+            : { downloadedBytes: progress.downloadedBytes }),
+          ...(progress.totalBytes === undefined ? {} : { totalBytes: progress.totalBytes }),
+          message: progress.message
+        };
+        broadcastUpdateStatus();
+      }
+    });
+
+    pushLog(`Update ${version} staged at ${staged.sourceDir}.`);
+    releaseState = { ...releaseState, lastAppliedAt: new Date().toISOString(), lastError: null };
+    await saveReleaseState(getRuntimeDir(), releaseState);
+
+    updateStatus = {
+      ...updateStatus,
+      phase: "applied",
+      stage: "restart",
+      message: `更新包已就绪，即将关闭并替换为 ${version}。`
+    };
+    broadcastUpdateStatus();
+
+    // 给界面一点时间显示最终状态，再退出让替换脚本接手。
+    setTimeout(() => {
+      stopServer();
+      launchSwapScript(staged);
+      app.quit();
+    }, 1200);
+
+    return updateStatus;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    pushLog(`Update apply failed: ${message}`);
+    releaseState = { ...releaseState, lastError: message };
+    await saveReleaseState(getRuntimeDir(), releaseState).catch(() => undefined);
+    updateStatus = {
+      ...updateStatus,
+      phase: "error",
+      error: message,
+      message: `更新失败：${message}`
+    };
+    broadcastUpdateStatus();
+    return updateStatus;
+  } finally {
+    isApplyingUpdate = false;
+  }
 }
 
 async function startStack() {
-  if (isStarting) return;
+  if (isStarting || isMigrating) return;
   isStarting = true;
-  blockedHostPorts = new Set();
   status.logs = [];
-  status.services.forEach((service) => {
-    service.status = "pending";
-    service.detail = undefined;
-  });
+  status.services = [
+    { name: "内置服务进程", status: "pending" },
+    { name: "API /health", status: "pending" },
+    { name: "API /readiness", status: "pending" }
+  ];
 
   try {
-    await checkDocker();
-    await selectRuntimePorts();
-    let { envPath, overridePath } = await writeRuntimeFiles();
-    setPhase("starting", "正在启动 Docker Compose 服务栈。");
-    try {
-      await startCompose(envPath, overridePath);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!isPortAllocatedMessage(message)) {
-        throw error;
-      }
+    setPhase("checking", "正在准备运行目录与端口。");
+    const userData = app.getPath("userData");
+    const runtimeDir = getRuntimeDir();
+    await mkdir(runtimeDir, { recursive: true });
+    await mkdir(getDataDir(), { recursive: true });
+    await mkdir(getStorageDir(), { recursive: true });
+    await ensureRuntimeReleaseState();
+    runtimeIdentity = await loadRuntimeIdentity(runtimeDir, userData);
+    status.userDataPath = userData;
+    status.dataPath = getDataDir();
+    status.instanceId = runtimeIdentity.instanceId;
+    status.logPath = log.transports.file.getFile().path;
 
-      pushLog("Docker reported a host port allocation conflict. Re-probing ports and retrying once; if it fails again, click retry.");
-      setService("Compose Stack", { status: "running", detail: "端口冲突，正在重新探测端口并重试一次。" });
-      blockedHostPorts = new Set([...blockedHostPorts, ...Object.values(runtimePorts)]);
-      await selectRuntimePorts();
-      ({ envPath, overridePath } = await writeRuntimeFiles());
-      await startCompose(envPath, overridePath);
-    }
+    stopServer();
+    await selectRuntimePort();
+    await maybeAutoMigrate(runtimeIdentity);
+
+    setPhase("starting", "正在启动内置服务。");
+    await startServer(runtimeIdentity);
     await waitForHealth();
     setPhase("ready", "服务已就绪，正在打开工作台。");
     await clearWorkbenchCache();
-    await mainWindow?.loadURL(getRuntimeUrls().webUrl);
+    await mainWindow?.loadURL(status.webUrl);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(message);
-    const userMessage = isImagePullNetworkError(message) ? getImagePullNetworkHint() : message;
-    if (isImagePullNetworkError(message)) {
-      setService("Compose Stack", { status: "error", detail: userMessage });
-    }
-    setPhase("error", userMessage);
+    setPhase("error", message);
   } finally {
     isStarting = false;
   }
@@ -942,25 +950,11 @@ async function createWindow() {
   await mainWindow.loadFile(join(__dirname, "..", "renderer", "index.html"));
   broadcastStatus();
   broadcastUpdateStatus();
+  // 上一次端内更新留下的临时目录，此时替换脚本早已结束，可以安全清理。
+  void cleanupStagingDirs(getUpdateWorkDir()).catch(() => undefined);
   void checkDesktopUpdates().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     pushLog(`Update check failed: ${message}`);
-  });
-  mainWindow.on("close", (event) => {
-    if (isExitingAfterCleanup || !currentComposeFiles) {
-      return;
-    }
-
-    event.preventDefault();
-    void performShutdownCleanup("window close")
-      .catch(() => {
-        // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
-      })
-      .finally(() => {
-        isExitingAfterCleanup = true;
-        mainWindow?.destroy();
-        app.exit(0);
-      });
   });
   void startStack();
 }
@@ -969,6 +963,9 @@ ipcMain.handle("desktop:get-status", () => status);
 ipcMain.handle("desktop:get-update-status", () => updateStatus);
 ipcMain.handle("desktop:check-updates", async () => {
   return checkDesktopUpdates();
+});
+ipcMain.handle("desktop:apply-update", async () => {
+  return applyDesktopUpdate();
 });
 ipcMain.handle("desktop:open-release-page", async () => {
   await shell.openExternal(
@@ -981,19 +978,17 @@ ipcMain.handle("desktop:retry", async () => {
   await mainWindow?.loadFile(join(__dirname, "..", "renderer", "index.html"));
   void startStack();
 });
-ipcMain.handle("desktop:start-docker", async () => {
-  await startDockerDesktopFromUi();
-});
-ipcMain.handle("desktop:open-docker-download", async () => {
-  await openDockerInstallGuide();
+ipcMain.handle("desktop:migrate-legacy", async () => {
+  await mainWindow?.loadFile(join(__dirname, "..", "renderer", "index.html"));
+  void manualMigrateLegacy();
 });
 ipcMain.handle("desktop:open-workbench", async () => {
   await clearWorkbenchCache();
-  await mainWindow?.loadURL(getRuntimeUrls().webUrl);
+  await mainWindow?.loadURL(status.webUrl);
 });
 ipcMain.handle("desktop:open-admin", async () => {
   await clearWorkbenchCache();
-  await mainWindow?.loadURL(getRuntimeUrls().adminUrl);
+  await mainWindow?.loadURL(status.adminUrl);
 });
 ipcMain.handle("desktop:open-user-data", async () => {
   await shell.openPath(app.getPath("userData"));
@@ -1009,34 +1004,10 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", (event) => {
-  if (isExitingAfterCleanup || !currentComposeFiles) {
-    return;
+app.on("before-quit", () => {
+  try {
+    migrationProcess?.kill();
+  } catch {
   }
-
-  event.preventDefault();
-  void performShutdownCleanup("before-quit")
-    .catch(() => {
-      // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
-    })
-    .finally(() => {
-      isExitingAfterCleanup = true;
-      app.exit(0);
-    });
-});
-
-app.on("will-quit", (event) => {
-  if (isExitingAfterCleanup || !currentComposeFiles) {
-    return;
-  }
-
-  event.preventDefault();
-  void performShutdownCleanup("will-quit")
-    .catch(() => {
-      // Failure is already logged; allow the app to exit after a best-effort cleanup attempt.
-    })
-    .finally(() => {
-      isExitingAfterCleanup = true;
-      app.exit(0);
-    });
+  stopServer();
 });

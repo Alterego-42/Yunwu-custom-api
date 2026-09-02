@@ -707,12 +707,19 @@ export const apiClient = {
     return request<unknown>("/settings");
   },
 
-  async updateUserSettings(input: UserSettings) {
+  async updateUserSettings(
+    input: UserSettings,
+    options: { includeModels?: boolean } = {},
+  ) {
+    // 切线路时不要把上一条线路的模型列表带过去：
+    // 三条线路的模型清单互不相同，服务端会按目标线路自己的选择恢复。
+    const includeModels = options.includeModels !== false;
     return request<unknown>("/settings", {
       method: "PATCH",
       body: {
+        activeProviderRouteId: input.providerRouteId,
         baseUrl: input.baseUrl,
-        enabledModelIds: input.availableModelIds,
+        ...(includeModels ? { enabledModelIds: input.availableModelIds } : {}),
         ui: {
           ...input.ui,
           theme: input.theme,
@@ -749,6 +756,39 @@ export const apiClient = {
     return request<ApiKeyMutationResponse>("/settings", {
       method: "PATCH",
       body: { apiKey: null },
+    });
+  },
+
+  async updateProviderRouteApiKey(routeId: string, apiKey: string) {
+    return request<ApiKeyMutationResponse>(
+      `/settings/provider-routes/${encodeURIComponent(routeId)}/api-key`,
+      { method: "PUT", body: { apiKey } },
+    );
+  },
+
+  async clearProviderRouteApiKey(routeId: string) {
+    return request<ApiKeyMutationResponse>(
+      `/settings/provider-routes/${encodeURIComponent(routeId)}/api-key`,
+      { method: "DELETE" },
+    );
+  },
+
+  async checkProviderRouteApiKey(routeId: string, apiKey?: string) {
+    const response = await request<ApiKeyMutationResponse>(
+      `/settings/provider-routes/${encodeURIComponent(routeId)}/api-key/check`,
+      { method: "POST", body: apiKey ? { apiKey } : {} },
+    );
+    if (response.ok === false) {
+      throw new ApiError(response.message ?? "API key connectivity check failed.");
+    }
+
+    return response;
+  },
+
+  async switchProviderRoute(routeId: string) {
+    return request<ApiKeyMutationResponse>("/settings", {
+      method: "PATCH",
+      body: { activeProviderRouteId: routeId },
     });
   },
 

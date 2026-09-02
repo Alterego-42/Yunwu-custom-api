@@ -63,23 +63,44 @@ import type {
   UserApiKeyCheckResponse,
   UserSettingsResponse,
 } from "./api.types";
+import { ImageProviderService } from "../openai-compatible/image-provider.service";
 import {
-  OpenAICompatibleService,
+  getProviderRoute,
+  isProviderRouteId,
+  PROVIDER_ROUTES,
+  providerRouteIdFromLegacyBaseUrl,
+  type ProviderRouteId,
+} from "../openai-compatible/provider-route-registry";
+import { UserProviderCredentialsService } from "../openai-compatible/user-provider-credentials.service";
+import {
   type OpenAICompatibleProviderProbeResult,
 } from "../openai-compatible/openai-compatible.service";
+
+// @yunwu/shared 是 ESM-only，CommonJS 的 API 只能做类型导入；
+// 运行时校验所需的合法值在此处内联（与 shared/constants.ts 保持一致）
+const TASK_STATUS_VALUES: readonly string[] = [
+  "queued",
+  "submitted",
+  "running",
+  "succeeded",
+  "failed",
+  "cancelled",
+  "expired",
+  "action_required",
+];
+const TASK_SOURCE_ACTION_VALUES: readonly string[] = [
+  "retry",
+  "edit",
+  "variant",
+  "fork",
+];
 import { ProviderAlertsService } from "../openai-compatible/provider-alerts.service";
 import { ProviderConfigurationService } from "../openai-compatible/provider-configuration.service";
 import {
   ProviderOperationalStateService,
   type ProviderOperationalStateRecord,
 } from "../openai-compatible/provider-operational-state.service";
-import {
-  DEFAULT_YUNWU_MODEL_IDS,
-  getYunwuModelDefinition,
-  YUNWU_BASE_URLS,
-  YUNWU_MODEL_DEFINITIONS,
-  type YunwuModelDefinition,
-} from "../openai-compatible/yunwu-model-registry";
+import { type YunwuModelDefinition } from "../openai-compatible/yunwu-model-registry";
 import { PrismaService } from "../prisma/prisma.service";
 import {
   TaskEventsService,
@@ -96,7 +117,6 @@ import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
 import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
 import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";
 
-export const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible";
 type SupportedTaskCapability = "image.generate" | "image.edit";
 type SupportedTaskSourceAction = "retry" | "edit" | "variant" | "fork";
 const SUPPORTED_TASK_CAPABILITIES: SupportedTaskCapability[] = [
@@ -114,13 +134,18 @@ interface TaskInputShape {
   assetIds?: string[];
   params?: Record<string, unknown>;
   providerBaseUrl?: string;
+  providerRouteId?: ProviderRouteId;
   batchCount?: number;
 }
 
 interface ResolvedUserSettings {
   baseUrl: string;
+  activeProviderRouteId: ProviderRouteId;
   providerApiKey?: string;
+  /** 当前线路启用的模型。 */
   enabledModelIds: string[];
+  /** 每条线路各自的模型选择，切换线路时互不覆盖。 */
+  enabledModelIdsByRoute: Partial<Record<ProviderRouteId, string[]>>;
   ui: Record<string, unknown>;
 }
 
@@ -138,7 +163,8 @@ export class ApiService implements OnModuleInit {
     private readonly taskQueue: TaskQueueService,
     private readonly taskEvents: TaskEventsService,
     private readonly conversationEvents: ConversationEventsService,
-    private readonly openaiCompatible: OpenAICompatibleService,
+    private readonly imageProvider: ImageProviderService,
+    private readonly providerCredentials: UserProviderCredentialsService,
     private readonly providerConfig: ProviderConfigurationService,
     private readonly providerState: ProviderOperationalStateService,
     private readonly providerAlerts: ProviderAlertsService,
@@ -152,7 +178,7 @@ export class ApiService implements OnModuleInit {
     const settings = await this.resolveUserSettings(user.id);
     const rows = await this.prisma.modelCapability.findMany({
       where: {
-        provider: OPENAI_COMPATIBLE_PROVIDER,
+        provider: getProviderRoute(settings.activeProviderRouteId).providerId,
         model: { in: settings.enabledModelIds },
       },
     });
@@ -176,7 +202,7 @@ export class ApiService implements OnModuleInit {
     const settings = await this.resolveUserSettings(user.id);
     const rows = await this.prisma.modelCapability.findMany({
       where: {
-        provider: OPENAI_COMPATIBLE_PROVIDER,
+        provider: getProviderRoute(settings.activeProviderRouteId).providerId,
         model: { in: settings.enabledModelIds },
       },
       orderBy: [{ provider: "asc" }, { model: "asc" }],
@@ -191,6 +217,7 @@ export class ApiService implements OnModuleInit {
   async getSettings(user: AuthenticatedUser): Promise<UserSettingsResponse> {
     return {
       settings: await this.toUserSettingsResponse(
+        user.id,
         await this.resolveUserSettings(user.id),
       ),
     };
@@ -201,27 +228,71 @@ export class ApiService implements OnModuleInit {
     input: UpdateUserSettingsDto,
   ): Promise<UserSettingsResponse> {
     const current = await this.resolveUserSettings(user.id);
-    const baseUrl =
-      input.baseUrl === undefined
-        ? current.baseUrl
-        : this.normalizeSupportedBaseUrl(input.baseUrl);
-    const enabledModelIds =
-      input.enabledModelIds === undefined
+
+    // 线路优先级：显式 routeId > 旧客户端传来的 baseUrl > 当前线路。
+    const activeProviderRouteId = input.activeProviderRouteId
+      ? this.providerCredentials.assertRoute(input.activeProviderRouteId)
+      : input.baseUrl
+        ? (providerRouteIdFromLegacyBaseUrl(input.baseUrl) ??
+          this.rejectUnsupportedBaseUrl())
+        : current.activeProviderRouteId;
+    const route = getProviderRoute(activeProviderRouteId);
+
+    // 切换线路时读取目标线路自己的模型选择，而不是把当前线路的列表带过去。
+    const storedForTargetRoute =
+      activeProviderRouteId === current.activeProviderRouteId
         ? current.enabledModelIds
-        : this.normalizeEnabledModelIds(input.enabledModelIds);
+        : (current.enabledModelIdsByRoute[activeProviderRouteId] ?? []);
+    // 切线路时旧客户端会把上一条线路的模型列表一起发过来；
+    // 此时只保留目标线路认识的 id，不因跨线路模型报错。
+    const routeChanged = activeProviderRouteId !== current.activeProviderRouteId;
+    const requestedModelIds = input.enabledModelIds;
+    const enabledModelIds = this.normalizeEnabledModelIdsForRoute(
+      requestedModelIds === undefined
+        ? storedForTargetRoute
+        : routeChanged
+          ? [
+              ...(current.enabledModelIdsByRoute[activeProviderRouteId] ?? []),
+              ...requestedModelIds,
+            ]
+          : requestedModelIds,
+      activeProviderRouteId,
+      { strict: requestedModelIds !== undefined && !routeChanged },
+    );
     const ui =
       input.ui === undefined ? current.ui : this.toJsonRecord(input.ui);
-    const providerApiKey =
-      input.clearApiKey === true
-        ? undefined
-        : input.apiKey === undefined
-          ? current.providerApiKey
-          : this.normalizeApiKey(input.apiKey);
 
-    const settings = { baseUrl, providerApiKey, enabledModelIds, ui };
+    // 密钥永远按线路单独存储，不再写入 user_settings。
+    if (input.clearApiKey === true) {
+      await this.providerCredentials.clearSecret(user.id, activeProviderRouteId);
+    } else if (input.apiKey !== undefined) {
+      const normalized = this.normalizeApiKey(input.apiKey);
+      if (normalized) {
+        await this.providerCredentials.setSecret(
+          user.id,
+          activeProviderRouteId,
+          normalized,
+        );
+      }
+    }
+
+    const settings: ResolvedUserSettings = {
+      activeProviderRouteId,
+      enabledModelIdsByRoute: {
+        ...current.enabledModelIdsByRoute,
+        [activeProviderRouteId]: enabledModelIds,
+      },
+      baseUrl: route.baseUrl,
+      providerApiKey: await this.providerCredentials.getSecretForExecution(
+        user.id,
+        activeProviderRouteId,
+      ),
+      enabledModelIds,
+      ui,
+    };
     await this.persistUserSettings(user.id, settings);
 
-    return { settings: await this.toUserSettingsResponse(settings) };
+    return { settings: await this.toUserSettingsResponse(user.id, settings) };
   }
 
   async checkUserApiKey(
@@ -238,8 +309,7 @@ export class ApiService implements OnModuleInit {
         ? temporaryApiKey
         : current.providerApiKey?.trim() || undefined;
     const check = apiKey
-      ? await this.openaiCompatible.checkProviderModels({
-          baseUrl: current.baseUrl,
+      ? await this.imageProvider.checkProviderModels(current.activeProviderRouteId, {
           apiKey,
         })
       : {
@@ -268,6 +338,30 @@ export class ApiService implements OnModuleInit {
         ...(apiKey ? { maskedApiKey: this.maskSecret(apiKey) } : {}),
       },
       check: healthCheck,
+    };
+  }
+
+  async updateProviderRouteApiKey(user: AuthenticatedUser, routeId: string, apiKey: string) {
+    return this.providerCredentials.setSecret(user.id, routeId, apiKey);
+  }
+
+  async clearProviderRouteApiKey(user: AuthenticatedUser, routeId: string) {
+    return this.providerCredentials.clearSecret(user.id, routeId);
+  }
+
+  async checkProviderRouteApiKey(user: AuthenticatedUser, routeId: string, temporaryApiKey?: string) {
+    const id = this.providerCredentials.assertRoute(routeId);
+    const apiKey = temporaryApiKey?.trim() || await this.providerCredentials.getSecretForExecution(user.id, id);
+    if (!apiKey) {
+      return { ok: false, providerRouteId: id, configured: false, message: "No API key is configured for this provider route." };
+    }
+    const check = await this.imageProvider.checkProviderModels(id, { apiKey });
+    return {
+      ok: !check.error,
+      providerRouteId: id,
+      configured: true,
+      maskedApiKey: `${apiKey.slice(0, 4)}...${apiKey.slice(-4)}`,
+      check,
     };
   }
 
@@ -390,9 +484,16 @@ export class ApiService implements OnModuleInit {
       );
     }
 
-    const model = await this.findEnabledModel(input.model, capability);
+    const model = await this.findEnabledModel(
+      input.model,
+      capability,
+      userSettings.activeProviderRouteId,
+    );
     if (!model) {
-      const configuredModel = await this.findConfiguredModel(input.model);
+      const configuredModel = await this.findConfiguredModel(
+        input.model,
+        userSettings.activeProviderRouteId,
+      );
       if (configuredModel && !this.isTaskSupportedModel(configuredModel)) {
         throw new BadRequestException(
           `Model ${input.model} is registered but this backend does not support its Yunwu API family yet. Enable only models marked taskSupported for user tasks.`,
@@ -511,7 +612,7 @@ export class ApiService implements OnModuleInit {
             model: input.model,
             prompt: input.prompt,
             assetIds: requestedAssetIds,
-            providerBaseUrl: userSettings.baseUrl,
+            providerRouteId: userSettings.activeProviderRouteId,
             params: this.toJsonRecord(input.params),
             ...(batchCount > 1 ? { batchCount } : {}),
           } satisfies Prisma.InputJsonObject,
@@ -544,7 +645,7 @@ export class ApiService implements OnModuleInit {
               model: input.model,
               prompt: input.prompt,
               assetIds: requestedAssetIds,
-              providerBaseUrl: userSettings.baseUrl,
+              providerRouteId: userSettings.activeProviderRouteId,
               params: this.toJsonRecord(input.params),
               batchCount,
             }),
@@ -1224,7 +1325,7 @@ export class ApiService implements OnModuleInit {
   async checkAdminProvider(): Promise<ProviderCheckResponse> {
     const rows = await this.getProviderModelCapabilities();
     const startedAt = Date.now();
-    const probe = await this.openaiCompatible.checkProviderModels();
+    const probe = await this.imageProvider.checkProviderModels();
     const check = await this.buildProviderHealthCheck(rows, probe, {
       latencyMs: Date.now() - startedAt,
     });
@@ -1278,7 +1379,7 @@ export class ApiService implements OnModuleInit {
         title: `Provider test ${new Date().toISOString()}`,
         metadata: {
           type: "provider_test",
-          provider: OPENAI_COMPATIBLE_PROVIDER,
+          provider: this.imageProvider.providerId,
         },
       },
     });
@@ -1307,7 +1408,7 @@ export class ApiService implements OnModuleInit {
       test: {
         capability: "image.generate",
         model,
-        mode: (await this.openaiCompatible.getProviderProfile()).mode,
+        mode: (await this.imageProvider.getProviderProfile()).mode,
         queuedAt: queuedAt.toISOString(),
         lastTest: this.toProviderLastTest(state),
       },
@@ -1329,6 +1430,11 @@ export class ApiService implements OnModuleInit {
   async updateAdminProviderConfig(
     input: UpdateProviderConfigDto,
   ): Promise<ProviderAdminResponse> {
+    if (!this.imageProvider.baseUrlConfigurable) {
+      throw new BadRequestException(
+        "APIXO 上游地址由环境变量 APIXO_BASE_URL 控制，管理台不支持修改。",
+      );
+    }
     await this.providerConfig.updateBaseUrl(input.baseUrl);
     const rows = await this.getProviderModelCapabilities();
     const state = await this.providerAlerts.refreshAlerts(
@@ -1358,17 +1464,21 @@ export class ApiService implements OnModuleInit {
   ): Promise<ResolvedUserSettings> {
     const rows = await this.prisma.$queryRaw<
       Array<{
+        activeProviderRouteId: string;
         baseUrl: string;
         providerApiKey: string | null;
         enabledModelIds: unknown;
+        enabledModelIdsByRoute: unknown;
         ui: unknown;
       }>
     >(
       Prisma.sql`
         SELECT
+          "active_provider_route_id" AS "activeProviderRouteId",
           "base_url" AS "baseUrl",
           "provider_api_key" AS "providerApiKey",
           "enabled_model_ids" AS "enabledModelIds",
+          "enabled_model_ids_by_route" AS "enabledModelIdsByRoute",
           "ui"
         FROM "user_settings"
         WHERE "user_id" = ${userId}
@@ -1379,18 +1489,34 @@ export class ApiService implements OnModuleInit {
 
     if (!row) {
       return {
-        baseUrl: await this.providerConfig.getBaseUrl(),
-        enabledModelIds: [...DEFAULT_YUNWU_MODEL_IDS],
+        activeProviderRouteId: "apixo",
+        baseUrl: getProviderRoute("apixo").baseUrl,
+        enabledModelIds: [...getProviderRoute("apixo").defaultModelIds],
+        enabledModelIdsByRoute: {},
         ui: {},
       };
     }
 
+    const activeProviderRouteId = isProviderRouteId(row.activeProviderRouteId)
+      ? row.activeProviderRouteId
+      : (providerRouteIdFromLegacyBaseUrl(row.baseUrl) ?? "apixo");
+    const route = getProviderRoute(activeProviderRouteId);
+    const byRoute = this.asEnabledModelsByRoute(row.enabledModelIdsByRoute);
+    // 旧库只有一份 enabled_model_ids：把它归给它当时所属的线路。
+    const storedForRoute =
+      byRoute[activeProviderRouteId] ?? this.asStringArray(row.enabledModelIds) ?? [];
     return {
-      baseUrl: this.normalizeSupportedBaseUrl(row.baseUrl),
-      providerApiKey: row.providerApiKey?.trim() || undefined,
-      enabledModelIds: this.normalizeEnabledModelIds(
-        this.asStringArray(row.enabledModelIds) ?? [],
+      activeProviderRouteId,
+      baseUrl: route.baseUrl,
+      providerApiKey: await this.providerCredentials.getSecretForExecution(
+        userId,
+        activeProviderRouteId,
       ),
+      enabledModelIds: this.normalizeEnabledModelIdsForRoute(
+        storedForRoute,
+        activeProviderRouteId,
+      ),
+      enabledModelIdsByRoute: byRoute,
       ui: this.asRecord(row.ui),
     };
   }
@@ -1405,8 +1531,10 @@ export class ApiService implements OnModuleInit {
           "id",
           "user_id",
           "base_url",
+          "active_provider_route_id",
           "provider_api_key",
           "enabled_model_ids",
+          "enabled_model_ids_by_route",
           "ui",
           "created_at",
           "updated_at"
@@ -1415,26 +1543,44 @@ export class ApiService implements OnModuleInit {
           ${userId},
           ${userId},
           ${settings.baseUrl},
-          ${settings.providerApiKey ?? null},
+          ${settings.activeProviderRouteId},
+          ${null},
           CAST(${JSON.stringify(settings.enabledModelIds)} AS JSONB),
+          CAST(${JSON.stringify({
+            ...settings.enabledModelIdsByRoute,
+            [settings.activeProviderRouteId]: settings.enabledModelIds,
+          })} AS JSONB),
           CAST(${JSON.stringify(settings.ui)} AS JSONB),
-          NOW(),
-          NOW()
+          CURRENT_TIMESTAMP,
+          CURRENT_TIMESTAMP
         )
         ON CONFLICT ("user_id") DO UPDATE SET
           "base_url" = EXCLUDED."base_url",
+          "active_provider_route_id" = EXCLUDED."active_provider_route_id",
           "provider_api_key" = EXCLUDED."provider_api_key",
           "enabled_model_ids" = EXCLUDED."enabled_model_ids",
+          "enabled_model_ids_by_route" = EXCLUDED."enabled_model_ids_by_route",
           "ui" = EXCLUDED."ui",
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
       `,
     );
   }
 
-  private async toUserSettingsResponse(settings: ResolvedUserSettings) {
+  private async toUserSettingsResponse(userId: string, settings: ResolvedUserSettings) {
+    const providerRoutes = await Promise.all(
+      PROVIDER_ROUTES.map(async (route) => ({
+        id: route.id,
+        label: route.label,
+        providerType: route.providerType,
+        baseUrl: route.baseUrl,
+        credential: await this.providerCredentials.getStatus(userId, route.id),
+      })),
+    );
     return {
+      activeProviderRouteId: settings.activeProviderRouteId,
+      providerRoutes,
       baseUrl: settings.baseUrl,
-      supportedBaseUrls: [...YUNWU_BASE_URLS],
+      supportedBaseUrls: PROVIDER_ROUTES.map((route) => route.baseUrl),
       enabledModelIds: settings.enabledModelIds,
       providerApiKey: {
         configured: Boolean(settings.providerApiKey),
@@ -1447,7 +1593,7 @@ export class ApiService implements OnModuleInit {
   }
 
   private toProviderHealthCheckForUserCheck(
-    check: Awaited<ReturnType<OpenAICompatibleService["checkProviderModels"]>>,
+    check: Awaited<ReturnType<ImageProviderService["checkProviderModels"]>>,
     apiKeyConfigured: boolean,
   ) {
     return {
@@ -1489,37 +1635,58 @@ export class ApiService implements OnModuleInit {
     return `${value.slice(0, 4)}...${value.slice(-4)}`;
   }
 
-  private normalizeSupportedBaseUrl(baseUrl: string) {
-    const normalized = baseUrl.trim().replace(/\/$/, "");
-    if (!YUNWU_BASE_URLS.includes(normalized as never)) {
-      throw new BadRequestException(
-        `Unsupported Yunwu base_url. Use one of: ${YUNWU_BASE_URLS.join(", ")}.`,
-      );
+  private asEnabledModelsByRoute(
+    value: unknown,
+  ): Partial<Record<ProviderRouteId, string[]>> {
+    const raw =
+      typeof value === "string"
+        ? this.tryParseJson(value)
+        : value;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      return {};
     }
-
-    return normalized;
+    const result: Partial<Record<ProviderRouteId, string[]>> = {};
+    for (const [key, entry] of Object.entries(raw as Record<string, unknown>)) {
+      if (!isProviderRouteId(key)) continue;
+      const models = this.asStringArray(entry);
+      if (models) result[key] = models;
+    }
+    return result;
   }
 
-  private normalizeEnabledModelIds(modelIds: string[]) {
-    const knownModelIds = new Set(YUNWU_MODEL_DEFINITIONS.map((model) => model.id));
-    const invalidModel = modelIds.find((modelId) => !knownModelIds.has(modelId));
-    if (invalidModel) {
-      throw new BadRequestException(
-        `Unknown Yunwu model id in enabledModelIds: ${invalidModel}.`,
-      );
+  private tryParseJson(value: string): unknown {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return undefined;
     }
+  }
 
-    return [
-      ...new Set([
-        ...DEFAULT_YUNWU_MODEL_IDS,
-        ...modelIds.filter((modelId) => knownModelIds.has(modelId)),
-      ]),
-    ];
+  private rejectUnsupportedBaseUrl(): never {
+    throw new BadRequestException("Unsupported provider base URL.");
+  }
+
+  private normalizeEnabledModelIdsForRoute(
+    modelIds: string[],
+    routeId: ProviderRouteId,
+    { strict = false }: { strict?: boolean } = {},
+  ) {
+    const route = getProviderRoute(routeId);
+    const known = new Set(route.modelDefinitions.map((model) => model.id));
+    if (strict) {
+      const unknown = modelIds.find((id) => !known.has(id));
+      if (unknown) {
+        throw new BadRequestException(
+          `Unknown model id for the ${route.label} route: ${unknown}.`,
+        );
+      }
+    }
+    return [...new Set([...route.defaultModelIds, ...modelIds.filter((id) => known.has(id))])];
   }
 
   private async getProviderModelCapabilities() {
     return this.prisma.modelCapability.findMany({
-      where: { provider: OPENAI_COMPATIBLE_PROVIDER },
+      where: { provider: this.imageProvider.providerId },
       orderBy: [{ model: "asc" }, { modality: "asc" }],
     });
   }
@@ -1532,7 +1699,7 @@ export class ApiService implements OnModuleInit {
       state?: ProviderOperationalStateRecord | null;
     } = {},
   ) {
-    const profile = await this.openaiCompatible.getProviderProfile();
+    const profile = await this.imageProvider.getProviderProfile();
     const remoteModelIds =
       input.probe?.remoteModelIds ??
       this.providerState.getRemoteModelIds(input.state ?? null);
@@ -1550,7 +1717,7 @@ export class ApiService implements OnModuleInit {
 
     return {
       ...profile,
-      supportedBaseUrls: [...YUNWU_BASE_URLS],
+      supportedBaseUrls: PROVIDER_ROUTES.map((route) => route.baseUrl),
       supportedCapabilities: this.supportedCapabilitiesFrom(rows),
       defaultModels: this.resolveDefaultModels(rows),
       models,
@@ -1573,7 +1740,7 @@ export class ApiService implements OnModuleInit {
     probe: OpenAICompatibleProviderProbeResult,
     input: { latencyMs?: number } = {},
   ): Promise<ProviderHealthCheck> {
-    const profile = await this.openaiCompatible.getProviderProfile();
+    const profile = await this.imageProvider.getProviderProfile();
     const models = this.toProviderModelSummaries(rows, probe.remoteModelIds);
     const configuredModelCount = models.length;
     const enabledModelCount = models.filter((model) => model.enabled).length;
@@ -1634,7 +1801,7 @@ export class ApiService implements OnModuleInit {
     state: ProviderOperationalStateRecord | null,
   ): Promise<ProviderHealthCheck | undefined> {
     const remoteModelIds = this.providerState.getRemoteModelIds(state);
-    const profile = await this.openaiCompatible.getProviderProfile();
+    const profile = await this.imageProvider.getProviderProfile();
     const models = this.toProviderModelSummaries(rows, remoteModelIds);
     const enabledModelCount = models.filter((model) => model.enabled).length;
     const modelsSource =
@@ -1851,7 +2018,7 @@ export class ApiService implements OnModuleInit {
     rows: ModelCapability[],
   ): Partial<Record<CapabilityType, string>> {
     const imageGenerate = this.findPreferredModel(rows, "image.generate", [
-      ...DEFAULT_YUNWU_MODEL_IDS,
+      ...this.imageProvider.defaultModelIds,
     ]);
     const imageEdit = this.findPreferredModel(rows, "image.edit", [
       "gpt-image-2",
@@ -1884,37 +2051,52 @@ export class ApiService implements OnModuleInit {
   }
 
   private async ensureDefaultModels() {
-    await Promise.all(
-      YUNWU_MODEL_DEFINITIONS.map((model) =>
-        this.prisma.modelCapability.upsert({
-          where: {
-            provider_model_modality: {
-              provider: OPENAI_COMPATIBLE_PROVIDER,
-              model: model.id,
-              modality: "image",
-            },
-          },
-          update: {
-            capabilities: model.capabilities,
-            metadata: this.toModelMetadata(model),
-          },
-          create: {
-            provider: OPENAI_COMPATIBLE_PROVIDER,
+    // 每条线路的模型清单与调用格式都不同（APIXO 走异步 generateTask，
+    // Yunwu/AnyAIGC 走 OpenAI 兼容接口），因此按 providerId 分别登记，
+    // 用户切换线路时不会读到另一条线路的模型能力。
+    const seeded = new Map<string, YunwuModelDefinition>();
+    for (const route of PROVIDER_ROUTES) {
+      for (const model of route.modelDefinitions) {
+        seeded.set(`${route.providerId}::${model.id}`, model);
+      }
+    }
+
+    // SQLite 只有一条写连接：并发 upsert 会把连接池排满并触发查询超时
+    // （桌面端冷启动时表现为 onModuleInit 失败、服务起不来），所以逐条顺序写。
+    for (const [key, model] of seeded) {
+      const provider = key.split("::")[0];
+      await this.prisma.modelCapability.upsert({
+        where: {
+          provider_model_modality: {
+            provider,
             model: model.id,
             modality: "image",
-            capabilities: model.capabilities,
-            enabled: model.defaultEnabled,
-            metadata: this.toModelMetadata(model),
           },
-        }),
-      ),
-    );
+        },
+        update: {
+          capabilities: model.capabilities,
+          metadata: this.toModelMetadata(model),
+        },
+        create: {
+          provider,
+          model: model.id,
+          modality: "image",
+          capabilities: model.capabilities,
+          enabled: model.defaultEnabled,
+          metadata: this.toModelMetadata(model),
+        },
+      });
+    }
   }
 
-  private async findEnabledModel(model: string, capability: CapabilityType) {
+  private async findEnabledModel(
+    model: string,
+    capability: CapabilityType,
+    routeId: ProviderRouteId,
+  ) {
     const rows = await this.prisma.modelCapability.findMany({
       where: {
-        provider: OPENAI_COMPATIBLE_PROVIDER,
+        provider: getProviderRoute(routeId).providerId,
         model,
       },
     });
@@ -1926,10 +2108,10 @@ export class ApiService implements OnModuleInit {
     );
   }
 
-  private async findConfiguredModel(model: string) {
+  private async findConfiguredModel(model: string, routeId: ProviderRouteId) {
     return this.prisma.modelCapability.findFirst({
       where: {
-        provider: OPENAI_COMPATIBLE_PROVIDER,
+        provider: getProviderRoute(routeId).providerId,
         model,
       },
     });
@@ -2017,7 +2199,7 @@ export class ApiService implements OnModuleInit {
     return {
       id: conversation.id,
       title: conversation.title ?? "Untitled conversation",
-      status: conversation.status,
+      status: this.asConversationStatus(conversation.status),
       ...(latestTaskModelId ? { latestTaskModelId } : {}),
       metadata:
         Object.keys(metadata).length > 0
@@ -2061,12 +2243,12 @@ export class ApiService implements OnModuleInit {
       capability: this.isSupportedCapability(task.type)
         ? task.type
         : "image.generate",
-      status: task.status,
+      status: this.asTaskStatus(task.status),
       modelId: input.model ?? "gpt-image-1",
       prompt: input.prompt ?? "",
       params: this.asRecord(input.params),
       sourceTaskId: task.sourceTaskId ?? undefined,
-      sourceAction: task.sourceAction ?? undefined,
+      sourceAction: this.asTaskSourceAction(task.sourceAction),
       failure: failure ?? undefined,
       canRetry: this.isRetryableTaskStatus(task.status),
       progress: task.progress,
@@ -2161,7 +2343,7 @@ export class ApiService implements OnModuleInit {
       id: item.id,
       taskId: item.taskId,
       batchIndex: item.batchIndex,
-      status: item.status,
+      status: this.asTaskStatus(item.status),
       progress: item.progress,
       assetId: item.assetId ?? undefined,
       errorMessage: item.errorMessage ?? undefined,
@@ -2345,7 +2527,10 @@ export class ApiService implements OnModuleInit {
       return true;
     }
 
-    const definition = getYunwuModelDefinition(row.model);
+    // 按行所属的上游查注册表：APIXO 与 OpenAI 兼容线路的模型清单不同。
+    const definition = PROVIDER_ROUTES.find(
+      (route) => route.providerId === row.provider,
+    )?.modelDefinitions.find((model) => model.id === row.model);
     return Boolean(definition?.taskSupported);
   }
 
@@ -2790,6 +2975,28 @@ export class ApiService implements OnModuleInit {
 
   private isRetryableTaskStatus(status: string) {
     return status === "succeeded" || status === "failed";
+  }
+
+  private asTaskStatus(status: string): TaskRecord["status"] {
+    return TASK_STATUS_VALUES.includes(status)
+      ? (status as TaskRecord["status"])
+      : "queued";
+  }
+
+  private asTaskSourceAction(
+    action: string | null | undefined,
+  ): TaskRecord["sourceAction"] {
+    if (!action) {
+      return undefined;
+    }
+
+    return TASK_SOURCE_ACTION_VALUES.includes(action)
+      ? (action as TaskRecord["sourceAction"])
+      : undefined;
+  }
+
+  private asConversationStatus(status: string): ConversationSummary["status"] {
+    return status === "archived" || status === "deleted" ? status : "active";
   }
 
   private getTaskRetryBlockedMessage(status: string) {

@@ -3,6 +3,7 @@ import type { CapabilityType } from "@yunwu/shared";
 export const YUNWU_BASE_URLS = [
   "https://yunwu.ai",
   "https://api3.wlai.vip",
+  "https://anyaigc.com",
 ] as const;
 
 export type YunwuBaseUrl = (typeof YUNWU_BASE_URLS)[number];
@@ -33,6 +34,7 @@ export const DEFAULT_YUNWU_MODEL_IDS = [
   "gemini-3-pro-image-preview",
   "gemini-3.1-flash-image-preview",
   "grok-4.2-image",
+  "grok-imagine-image",
   "grok-imagine-image-pro",
 ] as const;
 

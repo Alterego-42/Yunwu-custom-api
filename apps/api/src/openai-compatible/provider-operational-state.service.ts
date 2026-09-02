@@ -1,10 +1,11 @@
 import { Injectable } from "@nestjs/common";
-import { Prisma, type TaskStatus } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import type {
   ProviderAlert,
   ProviderAdminError,
   ProviderHealthCheck,
   ProviderModelsSource,
+  TaskStatus,
 } from "@yunwu/shared";
 import { PrismaService } from "../prisma/prisma.service";
 
@@ -102,7 +103,7 @@ export class ProviderOperationalStateService {
           CAST(${errorJson} AS JSONB),
           ${input.check.modelsSource},
           CAST(${remoteModelsSnapshotJson} AS JSONB),
-          NOW()
+          CURRENT_TIMESTAMP
         )
         ON CONFLICT ("id") DO UPDATE SET
           "last_check_status" = EXCLUDED."last_check_status",
@@ -111,7 +112,7 @@ export class ProviderOperationalStateService {
           "last_check_error" = EXCLUDED."last_check_error",
           "models_source" = EXCLUDED."models_source",
           "remote_models_snapshot" = EXCLUDED."remote_models_snapshot",
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
       `,
     );
 
@@ -135,14 +136,14 @@ export class ProviderOperationalStateService {
           CAST(${"queued"} AS "TaskStatus"),
           ${input.testedAt},
           NULL,
-          NOW()
+          CURRENT_TIMESTAMP
         )
         ON CONFLICT ("id") DO UPDATE SET
           "last_test_task_id" = EXCLUDED."last_test_task_id",
           "last_test_status" = EXCLUDED."last_test_status",
           "last_test_at" = EXCLUDED."last_test_at",
           "last_test_error" = NULL,
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
       `,
     );
 
@@ -156,7 +157,7 @@ export class ProviderOperationalStateService {
         SET
           "last_test_status" = CAST(${input.status} AS "TaskStatus"),
           "last_test_error" = ${input.error ?? null},
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
         WHERE
           "id" = ${PROVIDER_OPERATIONAL_STATE_ID}
           AND "last_test_task_id" = ${input.taskId}
@@ -185,7 +186,7 @@ export class ProviderOperationalStateService {
           ${PROVIDER_OPERATIONAL_STATE_ID},
           CAST(${alertsJson} AS JSONB),
           ${input.lastAcknowledgedAt ?? null},
-          NOW()
+          CURRENT_TIMESTAMP
         )
         ON CONFLICT ("id") DO UPDATE SET
           "active_alerts" = EXCLUDED."active_alerts",
@@ -193,7 +194,7 @@ export class ProviderOperationalStateService {
             EXCLUDED."last_acknowledged_at",
             "provider_operational_state"."last_acknowledged_at"
           ),
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
       `,
     );
 

@@ -1,35 +1,12 @@
-const normalizeS3Endpoint = () => {
-  const s3Endpoint = process.env.S3_ENDPOINT;
-  if (s3Endpoint) {
-    return s3Endpoint;
-  }
-
-  const minioEndpoint = process.env.MINIO_ENDPOINT;
-  if (!minioEndpoint) {
-    return undefined;
-  }
-
-  if (/^https?:\/\//.test(minioEndpoint)) {
-    return minioEndpoint;
-  }
-
-  const protocol = process.env.MINIO_USE_SSL === "true" ? "https" : "http";
-  const hasPort = minioEndpoint.includes(":");
-  const port = process.env.MINIO_PORT ?? "9000";
-  return `${protocol}://${minioEndpoint}${hasPort ? "" : `:${port}`}`;
-};
-
 export const configuration = () => ({
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: Number(process.env.PORT ?? 3000),
-  webPort: Number(process.env.WEB_PORT ?? 5173),
-  databaseUrl: process.env.DATABASE_URL,
-  redisUrl: process.env.REDIS_URL,
+  databaseUrl: process.env.DATABASE_URL ?? "file:./data/yunwu.db",
+  web: {
+    // 打包/生产模式下由 API 进程直接托管 Web 静态资源（替代 nginx）
+    distDir: process.env.WEB_DIST_DIR,
+  },
   tasks: {
-    queueName: process.env.TASK_QUEUE_NAME ?? "yunwu-image-tasks",
-    batchQueueName:
-      process.env.TASK_BATCH_QUEUE_NAME ?? "yunwu-image-batch-tasks",
-    eventsChannel: process.env.TASK_EVENTS_CHANNEL ?? "yunwu-image-task-events",
     workerEnabled:
       (process.env.TASK_WORKER_ENABLED ??
         process.env.TASK_QUEUE_ENABLED ??
@@ -47,7 +24,7 @@ export const configuration = () => ({
     origins: (
       process.env.CORS_ORIGIN ??
       process.env.WEB_ORIGIN ??
-      `http://127.0.0.1:${process.env.WEB_PORT ?? 5173}`
+      `http://127.0.0.1:${process.env.PORT ?? 3000}`
     )
       .split(",")
       .map((origin) => origin.trim())
@@ -71,41 +48,33 @@ export const configuration = () => ({
     },
   },
   storage: {
-    mode:
-      process.env.STORAGE_MODE ??
-      (process.env.S3_BUCKET || process.env.MINIO_BUCKET ? "s3" : "local"),
+    // 默认本地文件存储；仅显式设置 STORAGE_MODE=s3 时使用远端对象存储
+    mode: process.env.STORAGE_MODE ?? "local",
     local: {
       path: process.env.LOCAL_STORAGE_PATH ?? "./storage",
       publicBaseUrl: process.env.PUBLIC_ASSET_BASE_URL ?? undefined,
     },
     s3: {
-      endpoint: normalizeS3Endpoint(),
+      endpoint: process.env.S3_ENDPOINT,
       region: process.env.S3_REGION ?? process.env.AWS_REGION ?? "us-east-1",
-      bucket: process.env.S3_BUCKET ?? process.env.MINIO_BUCKET,
+      bucket: process.env.S3_BUCKET,
       accessKeyId:
-        process.env.S3_ACCESS_KEY_ID ??
-        process.env.AWS_ACCESS_KEY_ID ??
-        process.env.MINIO_ACCESS_KEY ??
-        process.env.MINIO_ROOT_USER,
+        process.env.S3_ACCESS_KEY_ID ?? process.env.AWS_ACCESS_KEY_ID,
       secretAccessKey:
-        process.env.S3_SECRET_ACCESS_KEY ??
-        process.env.AWS_SECRET_ACCESS_KEY ??
-        process.env.MINIO_SECRET_KEY ??
-        process.env.MINIO_ROOT_PASSWORD,
-      publicBaseUrl:
-        process.env.S3_PUBLIC_BASE_URL ?? process.env.MINIO_PUBLIC_BASE_URL,
-      forcePathStyle:
-        (process.env.S3_FORCE_PATH_STYLE ??
-          (process.env.MINIO_ENDPOINT ? "true" : "false")) === "true",
+        process.env.S3_SECRET_ACCESS_KEY ?? process.env.AWS_SECRET_ACCESS_KEY,
+      publicBaseUrl: process.env.S3_PUBLIC_BASE_URL,
+      forcePathStyle: (process.env.S3_FORCE_PATH_STYLE ?? "false") === "true",
     },
   },
-  minio: {
-    endpoint: process.env.MINIO_ENDPOINT,
-    port: Number(process.env.MINIO_PORT ?? 9000),
-    rootUser: process.env.MINIO_ROOT_USER,
-    rootPassword: process.env.MINIO_ROOT_PASSWORD,
-    bucket: process.env.MINIO_BUCKET,
-    useSsl: process.env.MINIO_USE_SSL === "true",
+  provider: {
+    // 图像上游类型：apixo（默认，APIXO Generation API） | openai-compatible（Yunwu）
+    type: process.env.PROVIDER_TYPE ?? "apixo",
+  },
+  apixo: {
+    providerName: process.env.APIXO_PROVIDER_NAME,
+    baseUrl: process.env.APIXO_BASE_URL ?? "https://api.apixo.ai/api/v1",
+    apiKey: process.env.APIXO_API_KEY,
+    pollTimeoutMs: Number(process.env.APIXO_POLL_TIMEOUT_MS ?? 600_000),
   },
   yunwu: {
     providerName: process.env.YUNWU_PROVIDER_NAME,

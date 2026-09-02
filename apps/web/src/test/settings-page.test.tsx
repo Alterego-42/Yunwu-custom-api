@@ -23,6 +23,10 @@ const mocks = vi.hoisted(() => ({
   updateUserApiKey: vi.fn(),
   verifyUserApiKey: vi.fn(),
   clearUserApiKey: vi.fn(),
+  updateProviderRouteApiKey: vi.fn(),
+  checkProviderRouteApiKey: vi.fn(),
+  clearProviderRouteApiKey: vi.fn(),
+  switchProviderRoute: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
@@ -33,6 +37,10 @@ vi.mock("@/lib/api-client", () => ({
     updateUserApiKey: mocks.updateUserApiKey,
     verifyUserApiKey: mocks.verifyUserApiKey,
     clearUserApiKey: mocks.clearUserApiKey,
+    updateProviderRouteApiKey: mocks.updateProviderRouteApiKey,
+    checkProviderRouteApiKey: mocks.checkProviderRouteApiKey,
+    clearProviderRouteApiKey: mocks.clearProviderRouteApiKey,
+    switchProviderRoute: mocks.switchProviderRoute,
   },
 }));
 
@@ -57,6 +65,21 @@ describe("settings page", () => {
       apiKey: { configured: true, maskedApiKey: "sk-***1234" },
       check: { baseUrlReachable: true, modelsSource: "remote" },
     });
+    mocks.updateProviderRouteApiKey.mockReset();
+    mocks.updateProviderRouteApiKey.mockResolvedValue({
+      apiKey: { configured: true, masked: "sk-***1234" },
+    });
+    mocks.checkProviderRouteApiKey.mockReset();
+    mocks.checkProviderRouteApiKey.mockResolvedValue({
+      ok: true,
+      providerRouteId: "apixo",
+      configured: true,
+      maskedApiKey: "sk-***1234",
+    });
+    mocks.clearProviderRouteApiKey.mockReset();
+    mocks.clearProviderRouteApiKey.mockResolvedValue({ configured: false });
+    mocks.switchProviderRoute.mockReset();
+    mocks.switchProviderRoute.mockResolvedValue({});
     mocks.clearUserApiKey.mockReset();
     mocks.clearUserApiKey.mockResolvedValue({ apiKey: { configured: false, masked: null } });
   });
@@ -136,11 +159,13 @@ describe("settings page", () => {
     expect(screen.getByText("界面密度")).toBeTruthy();
     expect(screen.getByText("最近项显示数量")).toBeTruthy();
     expect(screen.getByText("信息栏显示条数")).toBeTruthy();
-    expect(screen.getByText("API key")).toBeTruthy();
+    expect(screen.getByText("API key（按线路独立保存）")).toBeTruthy();
     expect(screen.getByLabelText("模型厂商")).toBeTruthy();
     expect(screen.getByLabelText("模型类型")).toBeTruthy();
+    expect(screen.getByText("https://api.apixo.ai/api/v1")).toBeTruthy();
     expect(screen.getByText("https://yunwu.ai")).toBeTruthy();
-    expect(screen.getByText("https://api3.wlai.vip")).toBeTruthy();
+    expect(screen.getByText("https://anyaigc.com")).toBeTruthy();
+    expect(screen.queryByText("https://api3.wlai.vip")).toBeNull();
     expect(screen.queryByText("https://yunwu.ai/v1")).toBeNull();
     expect(screen.queryByText("https://api.yunwu.ai/v1")).toBeNull();
   });
@@ -393,6 +418,14 @@ describe("settings page", () => {
           masked: "sk-***1234",
           maskedApiKey: "sk-***1234",
         },
+        activeProviderRouteId: "yunwu",
+        providerRoutes: [
+          {
+            id: "yunwu",
+            label: "Yunwu 线路",
+            credential: { configured: true, maskedApiKey: "sk-***1234" },
+          },
+        ],
       },
     });
 
@@ -417,11 +450,14 @@ describe("settings page", () => {
       normalizeUserSettings({ baseUrl: "https://api.yunwu.ai/v1" }).baseUrl,
     ).toBe("https://yunwu.ai");
     expect(normalizeUserSettings({ baseUrl: "https://example.com" }).baseUrl).toBe(
-      "https://yunwu.ai",
+      "https://api.apixo.ai/api/v1",
     );
     expect(normalizeUserSettings({ baseUrl: "https://api3.wlai.vip" }).baseUrl).toBe(
-      "https://api3.wlai.vip",
+      "https://yunwu.ai",
     );
+    expect(
+      normalizeUserSettings({ baseUrl: "https://api3.wlai.vip" }).providerRouteId,
+    ).toBe("yunwu");
   });
 
   it("keeps local storage as fallback when PATCH settings fails", async () => {
@@ -439,9 +475,17 @@ describe("settings page", () => {
     mocks.getUserSettings.mockResolvedValueOnce({
       settings: {
         baseUrl: "https://yunwu.ai",
+        activeProviderRouteId: "yunwu",
         enabledModelIds: DEFAULT_AVAILABLE_MODEL_IDS,
         ui: {},
         providerApiKey: { configured: true, maskedApiKey: "sk-***0000" },
+        providerRoutes: [
+          {
+            id: "yunwu",
+            label: "Yunwu 线路",
+            credential: { configured: true, maskedApiKey: "sk-***0000" },
+          },
+        ],
       },
     });
 
@@ -452,16 +496,125 @@ describe("settings page", () => {
 
     fireEvent.change(input, { target: { value: "sk-live-secret" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(mocks.updateUserApiKey).toHaveBeenCalledWith("sk-live-secret"));
+    await waitFor(() =>
+      expect(mocks.updateProviderRouteApiKey).toHaveBeenCalledWith("yunwu", "sk-live-secret"),
+    );
     expect(window.localStorage.getItem("yunwu:user-settings:v1")).not.toContain("sk-live-secret");
     expect((input as HTMLInputElement).value).toBe("");
 
     fireEvent.click(screen.getByRole("button", { name: "验证连通性" }));
-    await waitFor(() => expect(mocks.verifyUserApiKey).toHaveBeenCalledWith(undefined));
+    await waitFor(() =>
+      expect(mocks.checkProviderRouteApiKey).toHaveBeenCalledWith("yunwu", undefined),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "清除" }));
-    await waitFor(() => expect(mocks.clearUserApiKey).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(mocks.clearProviderRouteApiKey).toHaveBeenCalledWith("yunwu"),
+    );
     expect(await screen.findByText("未配置")).toBeTruthy();
+  });
+
+  it("keeps each provider route's api key state separate in the key panel", async () => {
+    mocks.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        baseUrl: "https://yunwu.ai",
+        activeProviderRouteId: "yunwu",
+        enabledModelIds: DEFAULT_AVAILABLE_MODEL_IDS,
+        ui: {},
+        providerApiKey: { configured: true, maskedApiKey: "sk-***yunwu" },
+        providerRoutes: [
+          {
+            id: "yunwu",
+            label: "Yunwu 线路",
+            credential: { configured: true, maskedApiKey: "sk-***yunwu" },
+          },
+          {
+            id: "apixo",
+            label: "APIXO 线路",
+            credential: { configured: false },
+          },
+          {
+            id: "anyaigc",
+            label: "AnyAIGC 线路",
+            credential: { configured: false },
+          },
+        ],
+      },
+    });
+
+    render(<SettingsPage />);
+
+    // 生效线路 Yunwu 已配置。
+    expect(await screen.findByText(/已配置 sk-\*\*\*yunwu/)).toBeTruthy();
+
+    // 切到 APIXO 的密钥页签：该线路自己的状态是未配置。
+    fireEvent.click(screen.getByRole("button", { name: "APIXO 线路" }));
+    expect(await screen.findByText("未配置")).toBeTruthy();
+
+    // 在 APIXO 页签保存的 key 只会写到 APIXO 线路。
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "sk-apixo-only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(mocks.updateProviderRouteApiKey).toHaveBeenCalledWith(
+        "apixo",
+        "sk-apixo-only",
+      ),
+    );
+    expect(mocks.updateProviderRouteApiKey).not.toHaveBeenCalledWith(
+      "yunwu",
+      "sk-apixo-only",
+    );
+
+    // 切回 Yunwu，原有掩码状态仍在。
+    fireEvent.click(screen.getByRole("button", { name: "Yunwu 线路" }));
+    expect(await screen.findByText(/已配置 sk-\*\*\*yunwu/)).toBeTruthy();
+  });
+
+  it("switches provider route without sending the previous route's models", async () => {
+    mocks.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        baseUrl: "https://yunwu.ai",
+        activeProviderRouteId: "yunwu",
+        enabledModelIds: ["gemini-3-pro-image-preview"],
+        ui: {},
+        providerApiKey: { configured: false },
+        providerRoutes: [
+          { id: "yunwu", label: "Yunwu 线路", credential: { configured: false } },
+          { id: "apixo", label: "APIXO 线路", credential: { configured: false } },
+        ],
+      },
+    });
+    mocks.updateUserSettings.mockResolvedValueOnce({
+      settings: {
+        baseUrl: "https://api.apixo.ai/api/v1",
+        activeProviderRouteId: "apixo",
+        enabledModelIds: ["nano-banana"],
+        ui: {},
+        providerApiKey: { configured: false },
+        providerRoutes: [
+          { id: "yunwu", label: "Yunwu 线路", credential: { configured: false } },
+          { id: "apixo", label: "APIXO 线路", credential: { configured: false } },
+        ],
+      },
+    });
+
+    render(<SettingsPage />);
+
+    // 访问线路里的按钮同时显示线路名与地址，和密钥页签的同名按钮区分开。
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /APIXO 线路\s+https:\/\/api\.apixo\.ai/,
+      }),
+    );
+
+    await waitFor(() => expect(mocks.updateUserSettings).toHaveBeenCalled());
+    const [payload, options] = mocks.updateUserSettings.mock.calls.at(-1) ?? [];
+    expect((payload as { providerRouteId?: string })?.providerRouteId).toBe("apixo");
+    // 关键：切线路时不能带上一条线路的模型列表。
+    expect((options as { includeModels?: boolean })?.includeModels).toBe(false);
+    expect(screen.queryByText(/未写入后端/)).toBeNull();
   });
 
   it("renders user-facing model tags instead of internal capability enums", async () => {

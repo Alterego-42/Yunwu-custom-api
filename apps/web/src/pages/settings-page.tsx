@@ -19,7 +19,7 @@ import {
   DARK_THEME_PRESETS,
   LIGHT_THEME_PRESETS,
   MODEL_CATALOG,
-  YUNWU_BASE_URL_OPTIONS,
+  PROVIDER_ROUTE_OPTIONS,
   applyUserTheme,
   loadStoredUserSettings,
   saveStoredUserSettings,
@@ -30,6 +30,7 @@ import {
   type AppDensity,
   type AppFontSize,
   type LightThemePreset,
+  type ProviderRouteId,
   type UserSettings,
 } from "@/lib/user-settings";
 import { cn } from "@/lib/utils";
@@ -92,6 +93,8 @@ function normalizeApiSettings(payload: unknown): UserSettings | null {
     customColor: settingsRecord.customColor ?? (ui as Record<string, unknown>).customColor,
     customTheme: settingsRecord.customTheme ?? (ui as Record<string, unknown>).customTheme,
     availableModelIds: settingsRecord.availableModelIds ?? settingsRecord.enabledModelIds,
+    providerRouteId:
+      settingsRecord.providerRouteId ?? settingsRecord.activeProviderRouteId,
     ui,
   });
 }
@@ -120,6 +123,43 @@ function normalizeApiKeyStatus(payload: unknown): ApiKeyStatus {
   };
 }
 
+/** 从 /settings 响应里读取三条线路各自的密钥状态。 */
+function normalizeRouteKeyStatuses(payload: unknown): Record<ProviderRouteId, ApiKeyStatus> {
+  const root = payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const settings =
+    root.settings && typeof root.settings === "object"
+      ? (root.settings as Record<string, unknown>)
+      : root;
+  const routes = Array.isArray(settings.providerRoutes) ? settings.providerRoutes : [];
+  const statuses = Object.fromEntries(
+    PROVIDER_ROUTE_OPTIONS.map((option) => [
+      option.id,
+      { configured: false, masked: null } as ApiKeyStatus,
+    ]),
+  ) as Record<ProviderRouteId, ApiKeyStatus>;
+
+  for (const entry of routes) {
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const id = record.id;
+    if (!PROVIDER_ROUTE_OPTIONS.some((option) => option.id === id)) {
+      continue;
+    }
+    const credential =
+      record.credential && typeof record.credential === "object"
+        ? (record.credential as Record<string, unknown>)
+        : {};
+    statuses[id as ProviderRouteId] = {
+      configured: credential.configured === true,
+      masked: typeof credential.maskedApiKey === "string" ? credential.maskedApiKey : null,
+    };
+  }
+
+  return statuses;
+}
+
 function getModelLabels(model: ModelRecord) {
   const labels: string[] = [];
   if (model.capabilityTypes.includes("image.generate") || model.type === "image-generation") {
@@ -143,8 +183,20 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [apiKeyInput, setApiKeyInput] = useState("");
-  const [apiKeyStatus, setApiKeyStatus] = useState<ApiKeyStatus>({ configured: false, masked: null });
   const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [routeKeyStatuses, setRouteKeyStatuses] = useState<Record<ProviderRouteId, ApiKeyStatus>>(
+    () =>
+      Object.fromEntries(
+        PROVIDER_ROUTE_OPTIONS.map((option) => [
+          option.id,
+          { configured: false, masked: null } as ApiKeyStatus,
+        ]),
+      ) as Record<ProviderRouteId, ApiKeyStatus>,
+  );
+  const [keyRouteId, setKeyRouteId] = useState<ProviderRouteId>(
+    () => loadStoredUserSettings().providerRouteId,
+  );
+  const apiKeyStatus = routeKeyStatuses[keyRouteId] ?? { configured: false, masked: null };
 
   useEffect(() => {
     let ignore = false;
@@ -172,7 +224,10 @@ export function SettingsPage() {
           saveStoredUserSettings(normalized);
           setError(null);
         }
-        setApiKeyStatus(normalizeApiKeyStatus(remoteSettings));
+        setRouteKeyStatuses(normalizeRouteKeyStatuses(remoteSettings));
+        if (normalized) {
+          setKeyRouteId(normalized.providerRouteId);
+        }
       }
     }
 
@@ -208,7 +263,11 @@ export function SettingsPage() {
     .map((id) => catalog.find((item) => item.id === id))
     .filter((item): item is (typeof catalog)[number] => Boolean(item));
 
-  async function persistSettings(next: UserSettings, successMessage = "已保存到后端设置") {
+  async function persistSettings(
+    next: UserSettings,
+    successMessage = "已保存到后端设置",
+    options: { includeModels?: boolean } = {},
+  ) {
     setSettings(next);
     applyUserTheme(next);
     setStatus(null);
@@ -216,7 +275,11 @@ export function SettingsPage() {
     setIsSaving(true);
 
     try {
-      const response = await apiClient.updateUserSettings(next);
+      // 只有切线路时才需要额外参数，其余保存保持单参调用。
+      const response =
+        options.includeModels === false
+          ? await apiClient.updateUserSettings(next, options)
+          : await apiClient.updateUserSettings(next);
       const normalized = normalizeApiSettings(response) ?? next;
       setSettings(normalized);
       saveStoredUserSettings(normalized);
@@ -316,8 +379,18 @@ export function SettingsPage() {
     void persistSettings({ ...settings, ui: { ...settings.ui, ...ui } }, successMessage);
   }
 
-  function updateBaseUrl(baseUrl: string) {
-    void persistSettings({ ...settings, baseUrl }, "已保存线路设置，后续任务将使用该线路");
+  function updateProviderRoute(routeId: ProviderRouteId) {
+    const option = PROVIDER_ROUTE_OPTIONS.find((item) => item.id === routeId);
+    if (!option) {
+      return;
+    }
+    setKeyRouteId(routeId);
+    // 只提交线路本身，模型列表由后端按该线路已保存的选择返回。
+    void persistSettings(
+      { ...settings, providerRouteId: routeId, baseUrl: option.value },
+      "已切换线路，后续任务将使用该线路及其独立 API key",
+      { includeModels: false },
+    );
   }
 
   function toggleModel(modelId: string) {
@@ -348,7 +421,10 @@ export function SettingsPage() {
     setError(null);
     try {
       const response = await action();
-      setApiKeyStatus(normalizeApiKeyStatus(response));
+      setRouteKeyStatuses((previous) => ({
+        ...previous,
+        [keyRouteId]: normalizeApiKeyStatus(response),
+      }));
       if (options.clearInput) {
         setApiKeyInput("");
       }
@@ -404,27 +480,32 @@ export function SettingsPage() {
             <section className="space-y-3">
               <h3 className="text-sm font-medium">访问线路</h3>
               <div className="grid gap-2">
-                {YUNWU_BASE_URL_OPTIONS.map((option) => (
+                {PROVIDER_ROUTE_OPTIONS.map((option) => (
                   <button
                     key={option.id}
                     type="button"
                     className={cn(
                       "min-w-0 rounded-[1.15rem] border border-[hsl(var(--outline-variant)/0.7)] px-4 py-3 text-left transition-colors",
-                      settings.baseUrl === option.value
+                      settings.providerRouteId === option.id
                         ? "bg-[hsl(var(--surface-container-high)/0.82)]"
                         : "bg-[hsl(var(--surface-container-low)/0.72)] hover:bg-[hsl(var(--surface-container)/0.78)]",
                     )}
-                    onClick={() => updateBaseUrl(option.value)}
+                    onClick={() => updateProviderRoute(option.id)}
                     disabled={isSaving}
                   >
                     <span className="flex items-center justify-between gap-3">
                       <span className="min-w-0 font-medium">{option.label}</span>
-                      {settings.baseUrl === option.value ? (
+                      {settings.providerRouteId === option.id ? (
                         <Check className="h-4 w-4 shrink-0 text-primary" />
                       ) : null}
                     </span>
                     <span className="mt-1 block break-all text-xs text-muted-foreground">
                       {option.value}
+                    </span>
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {routeKeyStatuses[option.id]?.configured
+                        ? "该线路 API key 已配置"
+                        : "该线路 API key 未配置"}
                     </span>
                   </button>
                 ))}
@@ -680,10 +761,29 @@ export function SettingsPage() {
             <section className="space-y-3">
               <div className="flex items-center gap-2">
                 <KeyRound className="h-4 w-4 text-primary" />
-                <h3 className="text-sm font-medium">API key</h3>
+                <h3 className="text-sm font-medium">API key（按线路独立保存）</h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {PROVIDER_ROUTE_OPTIONS.map((option) => (
+                  <Button
+                    key={option.id}
+                    size="sm"
+                    variant={keyRouteId === option.id ? "default" : "outline"}
+                    disabled={apiKeyBusy}
+                    onClick={() => {
+                      setKeyRouteId(option.id);
+                      setApiKeyInput("");
+                    }}
+                  >
+                    {option.label}
+                  </Button>
+                ))}
               </div>
               <div className="rounded-[1.2rem] border border-[hsl(var(--outline-variant)/0.7)] bg-[hsl(var(--surface-container-low)/0.82)] p-3 text-sm">
-                <p className="text-muted-foreground">当前状态</p>
+                <p className="text-muted-foreground">
+                  当前状态 · {PROVIDER_ROUTE_OPTIONS.find((option) => option.id === keyRouteId)?.label}
+                  {keyRouteId === settings.providerRouteId ? "（当前生效线路）" : ""}
+                </p>
                 <p className="mt-1 font-medium">
                   {apiKeyStatus.configured ? `已配置 ${apiKeyStatus.masked ?? "******"}` : "未配置"}
                 </p>
@@ -702,8 +802,9 @@ export function SettingsPage() {
                   disabled={apiKeyBusy || !apiKeyInput.trim()}
                   onClick={() =>
                     void handleApiKeyMutation(
-                      () => apiClient.updateUserApiKey(apiKeyInput.trim()),
-                      "API key 已保存",
+                      () =>
+                        apiClient.updateProviderRouteApiKey(keyRouteId, apiKeyInput.trim()),
+                      "该线路的 API key 已保存",
                       { clearInput: true },
                     )
                   }
@@ -716,8 +817,12 @@ export function SettingsPage() {
                   disabled={apiKeyBusy || (!apiKeyStatus.configured && !apiKeyInput.trim())}
                   onClick={() =>
                     void handleApiKeyMutation(
-                      () => apiClient.verifyUserApiKey(apiKeyInput.trim() || undefined),
-                      "API key 连通性验证完成",
+                      () =>
+                        apiClient.checkProviderRouteApiKey(
+                          keyRouteId,
+                          apiKeyInput.trim() || undefined,
+                        ),
+                      "该线路的 API key 连通性验证完成",
                     )
                   }
                 >
@@ -729,8 +834,8 @@ export function SettingsPage() {
                   disabled={apiKeyBusy || !apiKeyStatus.configured}
                   onClick={() =>
                     void handleApiKeyMutation(
-                      () => apiClient.clearUserApiKey(),
-                      "API key 已清除",
+                      () => apiClient.clearProviderRouteApiKey(keyRouteId),
+                      "该线路的 API key 已清除",
                       { clearInput: true },
                     )
                   }

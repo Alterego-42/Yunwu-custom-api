@@ -101,7 +101,25 @@ export interface ModelRecord {
   description?: string;
 }
 
+export type ProviderRouteId = "apixo" | "anyaigc" | "yunwu";
+
+export interface ProviderRouteCredentialStatus {
+  providerRouteId: ProviderRouteId;
+  configured: boolean;
+  maskedApiKey?: string;
+}
+
+export interface ProviderRouteSummary {
+  id: ProviderRouteId;
+  label: string;
+  providerType: string;
+  baseUrl: string;
+  credential: ProviderRouteCredentialStatus;
+}
+
 export interface UserSettingsRecord {
+  activeProviderRouteId: ProviderRouteId;
+  providerRoutes: ProviderRouteSummary[];
   baseUrl: string;
   supportedBaseUrls: string[];
   enabledModelIds: string[];
@@ -110,6 +128,14 @@ export interface UserSettingsRecord {
     maskedApiKey?: string;
   };
   ui: Record<string, unknown>;
+}
+
+export interface ProviderRouteApiKeyCheckResponse {
+  ok: boolean;
+  providerRouteId: ProviderRouteId;
+  configured: boolean;
+  maskedApiKey?: string;
+  message?: string;
 }
 
 export interface UserSettingsResponse {

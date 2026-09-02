@@ -78,6 +78,7 @@ type OpenAICompatibleRequestStage =
 
 type OpenAICompatibleRequestErrorKind =
   | "timeout"
+  | "connect_timeout"
   | "network"
   | "connection_reset"
   | "tls"
@@ -409,6 +410,40 @@ export class OpenAICompatibleService {
     });
   }
 
+  private async submitGrokImageGenerateRequest(
+    endpoint: string,
+    apiKey: string,
+    request: OpenAICompatibleImageRequest,
+  ) {
+    const params = this.sanitizeImageRequestParams(request.params);
+    const size = typeof params.size === "string" ? params.size.trim() : undefined;
+    const aspectRatio =
+      this.resolveGrokImageAspectRatio(params.aspect_ratio) ??
+      this.resolveGrokImageAspectRatio(size);
+
+    // Grok 系列走 Images JSON 格式：
+    // { model, prompt, aspect_ratio, n, quality, resolution, response_format, size }
+    const body: Record<string, unknown> = {
+      model: request.model,
+      prompt: request.prompt,
+      n: typeof params.n === "number" ? params.n : 1,
+      quality: this.asString(params.quality) ?? "medium",
+      resolution: this.asString(params.resolution) ?? "1k",
+      response_format: this.asString(params.response_format) ?? "b64_json",
+      ...(aspectRatio ? { aspect_ratio: aspectRatio } : {}),
+      ...(size && /^\d+x\d+$/i.test(size) ? { size } : {}),
+    };
+
+    return fetch(endpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
   private async sendImageRequest(
     endpoint: string,
     apiKey: string,
@@ -423,7 +458,9 @@ export class OpenAICompatibleService {
 
       return request.capability === "image.edit"
         ? await this.submitImageEditRequest(endpoint, apiKey, request)
-        : await fetch(endpoint, {
+        : this.isGrokImageGenerateRequest(request)
+          ? await this.submitGrokImageGenerateRequest(endpoint, apiKey, request)
+          : await fetch(endpoint, {
             method: "POST",
             headers: {
               Authorization: `Bearer ${apiKey}`,
@@ -913,8 +950,15 @@ export class OpenAICompatibleService {
         : typeof cause === "object" && cause
           ? JSON.stringify(cause)
           : String(cause ?? "");
+    const causeCode =
+      typeof cause === "object" && cause && "code" in cause
+        ? String((cause as { code?: unknown }).code ?? "")
+        : "";
     const haystack = `${error instanceof Error ? error.name : ""} ${rawMessage} ${causeText}`;
 
+    if (causeCode === "UND_ERR_CONNECT_TIMEOUT" || /UND_ERR_CONNECT_TIMEOUT/i.test(haystack)) {
+      return "connect_timeout";
+    }
     if (/abort|timeout|timed out/i.test(haystack)) {
       return "timeout";
     }
@@ -1224,6 +1268,12 @@ export class OpenAICompatibleService {
 
   private isGrokImageEditRequest(request: OpenAICompatibleImageRequest) {
     return request.capability === "image.edit" && request.model.startsWith("grok-");
+  }
+
+  private isGrokImageGenerateRequest(request: OpenAICompatibleImageRequest) {
+    return (
+      request.capability === "image.generate" && request.model.startsWith("grok-")
+    );
   }
 
   private resolveImageEndpointPath(request: OpenAICompatibleImageRequest) {

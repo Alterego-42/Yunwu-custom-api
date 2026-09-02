@@ -6,6 +6,7 @@ import { ApiConfigModule } from "./config/config.module";
 import { HealthModule } from "./health/health.module";
 import { LoggingModule } from "./logging/logging.module";
 import { PrismaModule } from "./prisma/prisma.module";
+import { TaskWorkerModule } from "./tasks/task-worker.module";
 import { TasksModule } from "./tasks/tasks.module";
 
 @Module({
@@ -15,6 +16,7 @@ import { TasksModule } from "./tasks/tasks.module";
     PrismaModule,
     ConversationEventsModule,
     TasksModule,
+    TaskWorkerModule,
     AuthModule,
     HealthModule,
     ApiModule,

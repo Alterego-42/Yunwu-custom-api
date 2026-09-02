@@ -1,10 +1,6 @@
 import { Injectable } from "@nestjs/common";
-import {
-  Prisma,
-  type Task,
-  type TaskEvent,
-  type TaskStatus,
-} from "@prisma/client";
+import { Prisma, type Task, type TaskEvent } from "@prisma/client";
+import type { TaskStatus } from "@yunwu/shared";
 import { PrismaService } from "../prisma/prisma.service";
 
 export interface RecordTaskEventInput {

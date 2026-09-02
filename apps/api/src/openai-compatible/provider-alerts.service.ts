@@ -2,12 +2,11 @@ import { Injectable } from "@nestjs/common";
 import type { ModelCapability } from "@prisma/client";
 import type { ProviderAlert } from "@yunwu/shared";
 import { PrismaService } from "../prisma/prisma.service";
+import { ImageProviderService } from "./image-provider.service";
 import {
   ProviderOperationalStateRecord,
   ProviderOperationalStateService,
 } from "./provider-operational-state.service";
-
-const OPENAI_COMPATIBLE_PROVIDER = "openai-compatible";
 const MAX_FAILED_TASK_ALERTS = 5;
 const SUPPORTED_FAILURE_TYPES = ["image.generate", "image.edit"] as const;
 
@@ -16,6 +15,7 @@ export class ProviderAlertsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly providerState: ProviderOperationalStateService,
+    private readonly imageProvider: ImageProviderService,
   ) {}
 
   async refreshAlerts(
@@ -40,7 +40,7 @@ export class ProviderAlertsService {
   ): Promise<ProviderAlert[]> {
     const enabledModels = await this.prisma.modelCapability.findMany({
       where: {
-        provider: OPENAI_COMPATIBLE_PROVIDER,
+        provider: this.imageProvider.providerId,
         enabled: true,
       },
       orderBy: [{ model: "asc" }, { modality: "asc" }],

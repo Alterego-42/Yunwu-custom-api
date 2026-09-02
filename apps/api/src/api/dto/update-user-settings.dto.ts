@@ -11,6 +11,10 @@ import {
 export class UpdateUserSettingsDto {
   @IsOptional()
   @IsString()
+  activeProviderRouteId?: string;
+
+  @IsOptional()
+  @IsString()
   baseUrl?: string;
 
   @IsOptional()

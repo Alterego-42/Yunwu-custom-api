@@ -3,60 +3,19 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
   url      = env("DATABASE_URL")
 }
 
-enum ConversationStatus {
-  active
-  archived
-  deleted
-}
-
-enum MessageRole {
-  system
-  user
-  assistant
-  tool
-}
-
-enum AssetStatus {
-  pending
-  ready
-  failed
-  deleted
-}
-
-enum UserRole {
-  admin
-  demo
-  member
-}
-
-enum TaskStatus {
-  queued
-  submitted
-  running
-  succeeded
-  failed
-  cancelled
-  expired
-  action_required
-}
-
-enum TaskSourceAction {
-  retry
-  edit
-  variant
-  fork
-}
+// SQLite 不支持 Prisma enum：状态字段使用 String，
+// 合法值以 @yunwu/shared 的常量（TASK_STATUSES / USER_ROLES 等）为准。
 
 model User {
   id                String         @id @default(cuid())
   email             String?        @unique
   displayName       String?        @map("display_name")
   avatarUrl         String?        @map("avatar_url")
-  role              UserRole       @default(member)
+  role              String         @default("member")
   passwordHash      String?        @map("password_hash")
   passwordUpdatedAt DateTime?      @map("password_updated_at")
   metadata          Json?
@@ -67,6 +26,7 @@ model User {
   assets            Asset[]
   tasks             Task[]
   settings          UserSettings?
+  providerCredentials UserProviderCredential[]
 
   @@map("users")
 }
@@ -76,6 +36,8 @@ model UserSettings {
   userId          String   @unique @map("user_id")
   baseUrl         String   @map("base_url")
   providerApiKey  String?  @map("provider_api_key")
+  activeRouteId   String   @default("apixo") @map("active_provider_route_id")
+  enabledModelIdsByRoute Json? @map("enabled_model_ids_by_route")
   enabledModelIds Json     @map("enabled_model_ids")
   ui              Json?
   createdAt       DateTime @default(now()) @map("created_at")
@@ -85,15 +47,28 @@ model UserSettings {
   @@map("user_settings")
 }
 
+model UserProviderCredential {
+  userId          String   @map("user_id")
+  providerRouteId String   @map("provider_route_id")
+  apiKey          String   @map("api_key")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, providerRouteId])
+  @@index([userId])
+  @@map("user_provider_credentials")
+}
+
 model Conversation {
-  id        String             @id @default(cuid())
-  userId    String             @map("user_id")
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
   title     String?
-  status    ConversationStatus @default(active)
+  status    String    @default("active")
   metadata  Json?
-  createdAt DateTime           @default(now()) @map("created_at")
-  updatedAt DateTime           @updatedAt @map("updated_at")
-  user      User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   messages  Message[]
   tasks     Task[]
 
@@ -105,7 +80,7 @@ model Message {
   id             String       @id @default(cuid())
   conversationId String       @map("conversation_id")
   userId         String?      @map("user_id")
-  role           MessageRole
+  role           String
   content        String
   metadata       Json?
   createdAt      DateTime     @default(now()) @map("created_at")
@@ -127,7 +102,7 @@ model Asset {
   mimeType  String?     @map("mime_type")
   url       String?
   storageKey String?    @map("storage_key")
-  status    AssetStatus @default(pending)
+  status    String      @default("pending")
   metadata  Json?
   createdAt DateTime    @default(now()) @map("created_at")
   updatedAt DateTime    @updatedAt @map("updated_at")
@@ -147,9 +122,9 @@ model Task {
   userId         String?          @map("user_id")
   conversationId String?          @map("conversation_id")
   sourceTaskId   String?          @map("source_task_id")
-  sourceAction   TaskSourceAction? @map("source_action")
+  sourceAction   String?          @map("source_action")
   type           String
-  status         TaskStatus       @default(queued)
+  status         String           @default("queued")
   progress       Int              @default(0)
   input          Json?
   output         Json?
@@ -175,7 +150,7 @@ model TaskBatchItem {
   id              String     @id @default(cuid())
   taskId          String     @map("task_id")
   batchIndex      Int        @map("batch_index")
-  status          TaskStatus @default(queued)
+  status          String     @default("queued")
   progress        Int        @default(0)
   assetId         String?    @map("asset_id")
   errorMessage    String?    @map("error_message")
@@ -196,14 +171,14 @@ model TaskBatchItem {
 }
 
 model TaskEvent {
-  id        String      @id @default(cuid())
-  taskId    String      @map("task_id")
-  eventType String      @map("event_type")
-  status    TaskStatus?
+  id        String   @id @default(cuid())
+  taskId    String   @map("task_id")
+  eventType String   @map("event_type")
+  status    String?
   summary   String
   details   Json?
-  createdAt DateTime    @default(now()) @map("created_at")
-  task      Task        @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now()) @map("created_at")
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@index([taskId])
   @@index([createdAt])
@@ -226,20 +201,20 @@ model ModelCapability {
 }
 
 model ProviderOperationalState {
-  id                   String      @id
-  lastCheckStatus      String?     @map("last_check_status")
-  lastCheckAt          DateTime?   @map("last_check_at")
-  lastCheckLatencyMs   Int?        @map("last_check_latency_ms")
-  lastCheckError       Json?       @map("last_check_error")
-  modelsSource         String?     @map("models_source")
-  remoteModelsSnapshot Json?       @map("remote_models_snapshot")
-  lastTestTaskId       String?     @map("last_test_task_id")
-  lastTestStatus       TaskStatus? @map("last_test_status")
-  lastTestAt           DateTime?   @map("last_test_at")
-  lastTestError        String?     @map("last_test_error")
-  activeAlerts         Json?       @map("active_alerts")
-  lastAcknowledgedAt   DateTime?   @map("last_acknowledged_at")
-  updatedAt            DateTime    @updatedAt @map("updated_at")
+  id                   String    @id
+  lastCheckStatus      String?   @map("last_check_status")
+  lastCheckAt          DateTime? @map("last_check_at")
+  lastCheckLatencyMs   Int?      @map("last_check_latency_ms")
+  lastCheckError       Json?     @map("last_check_error")
+  modelsSource         String?   @map("models_source")
+  remoteModelsSnapshot Json?     @map("remote_models_snapshot")
+  lastTestTaskId       String?   @map("last_test_task_id")
+  lastTestStatus       String?   @map("last_test_status")
+  lastTestAt           DateTime? @map("last_test_at")
+  lastTestError        String?   @map("last_test_error")
+  activeAlerts         Json?     @map("active_alerts")
+  lastAcknowledgedAt   DateTime? @map("last_acknowledged_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
 
   @@map("provider_operational_state")
 }

@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import * as argon2 from "argon2";
 import { ConflictException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import type { UserRole } from "@prisma/client";
+import type { UserRole } from "@yunwu/shared";
 import { AuthService } from "./auth.service";
 
 type StoredUser = {
@@ -32,10 +32,8 @@ function createPrismaStub(seedUsers: StoredUser[] = []) {
     users,
     prisma: {
       user: {
-        async findFirst(args: {
-          where: { email: { equals: string; mode: "insensitive" } };
-        }) {
-          const target = args.where.email.equals.toLowerCase();
+        async findFirst(args: { where: { email: string } }) {
+          const target = args.where.email.toLowerCase();
           return (
             users.find((user) => user.email?.toLowerCase() === target) ?? null
           );

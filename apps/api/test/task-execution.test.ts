@@ -9,6 +9,39 @@ import {
 
 const NOW = new Date("2026-04-24T08:00:00.000Z");
 
+/**
+ * 适配新的 route-aware 门面：TaskExecutionService 现在按线路调用上游，
+ * 测试里仍复用单上游 mock。
+ */
+function asImageProvider(provider: {
+  getBaseConfig: () => unknown;
+  createImageTask: (request: never) => unknown;
+  providerId?: string;
+}) {
+  return {
+    providerId: provider.providerId ?? "openai-compatible",
+    getBaseConfig: async () => provider.getBaseConfig(),
+    createImageTask: async (
+      _routeId: string,
+      request: Record<string, unknown>,
+    ) => provider.createImageTask(request as never),
+  };
+}
+
+/** 线路密钥读取：沿用各用例已有的 $queryRaw 桩数据。 */
+function createCredentialsMock(prisma: {
+  $queryRaw: (...args: never[]) => Promise<unknown>;
+}) {
+  return {
+    getSecretForExecution: async () => {
+      const rows = (await (prisma.$queryRaw as () => Promise<unknown>)()) as
+        | Array<{ providerApiKey?: string | null }>
+        | undefined;
+      return rows?.[0]?.providerApiKey?.trim() || undefined;
+    },
+  };
+}
+
 function createAssetStorageMock(calls?: {
   store?: Array<Record<string, unknown>>;
 }) {
@@ -38,6 +71,7 @@ test("TaskExecutionService fails user image tasks without API key and does not c
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "gpt-image-2",
       prompt: "Draw a fail-closed diagnostic image",
       assetIds: [],
@@ -109,7 +143,8 @@ test("TaskExecutionService fails user image tasks without API key and does not c
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     providerState as never,
     providerAlerts as never,
     conversationEvents as never,
@@ -155,6 +190,7 @@ test("TaskExecutionService prefers the user API key over the global key", async 
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "gpt-image-2",
       prompt: "Draw a lantern by the lake",
       assetIds: [],
@@ -211,7 +247,8 @@ test("TaskExecutionService prefers the user API key over the global key", async 
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible as never,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     providerState as never,
     providerAlerts as never,
     conversationEvents as never,
@@ -250,6 +287,7 @@ test("TaskExecutionService keeps remote provider URLs when local materialization
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "grok-4.2-image",
       prompt: "Draw a blue triangle",
       assetIds: [],
@@ -291,7 +329,8 @@ test("TaskExecutionService keeps remote provider URLs when local materialization
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible as never,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     { persistTestFinished: async () => undefined, getState: async () => null } as never,
     { refreshAlerts: async <T>(value: T) => value } as never,
     { publishTaskUpdated: (payload: Record<string, unknown>) => calls.published.push(payload) } as never,
@@ -325,6 +364,7 @@ test("TaskExecutionService records concrete provider request failure details", a
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "gpt-image-2",
       prompt: "Draw a diagnostic image",
       assetIds: [],
@@ -374,7 +414,8 @@ test("TaskExecutionService records concrete provider request failure details", a
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible as never,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     { persistTestFinished: async () => undefined, getState: async () => null } as never,
     { refreshAlerts: async <T>(value: T) => value } as never,
     { publishTaskUpdated: () => undefined } as never,
@@ -447,6 +488,7 @@ test("TaskExecutionService executes batch slots concurrently and stores partial 
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "gpt-image-2",
       prompt: "Draw three lantern variations",
       assetIds: [],
@@ -586,7 +628,8 @@ test("TaskExecutionService executes batch slots concurrently and stores partial 
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible as never,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     { persistTestFinished: async () => undefined, getState: async () => null } as never,
     { refreshAlerts: async <T>(value: T) => value } as never,
     {
@@ -667,6 +710,7 @@ test("TaskExecutionService marks batch slots failed when shared batch setup fail
     status: "queued",
     progress: 0,
     input: {
+      providerRouteId: "yunwu",
       model: "gpt-image-2",
       prompt: "Draw two setup failure variations",
       assetIds: [],
@@ -755,7 +799,8 @@ test("TaskExecutionService marks batch slots failed when shared batch setup fail
   };
   const service = new TaskExecutionService(
     prisma as never,
-    openaiCompatible as never,
+    asImageProvider(openaiCompatible) as never,
+    createCredentialsMock(prisma) as never,
     { persistTestFinished: async () => undefined, getState: async () => null } as never,
     { refreshAlerts: async <T>(value: T) => value } as never,
     {
@@ -798,6 +843,36 @@ test("TaskExecutionService marks batch slots failed when shared batch setup fail
 
 test("TaskExecutionService classifies provider status and payload failures", async () => {
   const cases = [
+    {
+      name: "connection timeout",
+      error: new OpenAICompatibleRequestError("fetch failed", {
+        mode: "live",
+        endpointPath: "/v1/images/generations",
+        stage: "request",
+        errorKind: "connect_timeout",
+        fetchErrorName: "TypeError",
+        fetchCauseCode: "UND_ERR_CONNECT_TIMEOUT",
+      }),
+      category: "provider_unreachable",
+      retryable: true,
+      title: "Provider unreachable",
+      message:
+        "The connection to the image provider timed out. Check the provider base URL and network environment, then retry.",
+    },
+    {
+      name: "request timeout",
+      error: new OpenAICompatibleRequestError("request timed out", {
+        mode: "live",
+        endpointPath: "/v1/images/generations",
+        stage: "request",
+        errorKind: "timeout",
+      }),
+      category: "provider_timeout",
+      retryable: true,
+      title: "Provider request timed out",
+      message:
+        "The image provider timed out before returning a response. Please retry later.",
+    },
     {
       name: "auth",
       error: new OpenAICompatibleRequestError("invalid token", {
@@ -882,10 +957,17 @@ test("TaskExecutionService classifies provider status and payload failures", asy
       {} as never,
       {} as never,
       {} as never,
+      {} as never,
     );
     const failure = service["buildFailureSummary"](testCase.error);
 
     assert.equal(failure.category, testCase.category, testCase.name);
     assert.equal(failure.retryable, testCase.retryable, testCase.name);
+    if ("title" in testCase) {
+      assert.equal(failure.title, testCase.title, testCase.name);
+    }
+    if ("message" in testCase) {
+      assert.equal(failure.errorMessage, testCase.message, testCase.name);
+    }
   }
 });

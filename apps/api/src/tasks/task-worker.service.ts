@@ -1,28 +1,19 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from "@nestjs/common";
+import { Injectable, Logger, OnModuleInit } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
-import { Job, Worker } from "bullmq";
-import IORedis from "ioredis";
 import { TaskExecutionService } from "./task-execution.service";
-import { TASK_QUEUE_JOB_NAME } from "./task-queue.constants";
-import type { TaskQueueJobData } from "./task-queue.service";
+import { TaskQueueService } from "./task-queue.service";
 
+/**
+ * 将任务执行器注册到进程内队列。
+ * v0.7.0 起 worker 与 API 合并为单进程，无需独立 worker 进程与 Redis。
+ */
 @Injectable()
-export class TaskWorkerService implements OnModuleInit, OnModuleDestroy {
+export class TaskWorkerService implements OnModuleInit {
   private readonly logger = new Logger(TaskWorkerService.name);
-  private worker?: Worker<TaskQueueJobData>;
-  private batchWorker?: Worker<TaskQueueJobData>;
-  private connection?: IORedis;
-  private readonly handleConnectionError = (error: Error) => {
-    this.logger.error(`Task worker redis error: ${error.message}`);
-  };
 
   constructor(
     private readonly config: ConfigService,
+    private readonly taskQueue: TaskQueueService,
     private readonly taskExecution: TaskExecutionService,
   ) {}
 
@@ -32,73 +23,10 @@ export class TaskWorkerService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const redisUrl = this.config.get<string>("redisUrl");
-    if (!redisUrl) {
-      throw new Error("REDIS_URL is required for task worker.");
-    }
-
-    this.connection = new IORedis(redisUrl, {
-      maxRetriesPerRequest: null,
-    });
-    this.connection.on("error", this.handleConnectionError);
-    const queueName = this.config.get<string>(
-      "tasks.queueName",
-      "yunwu-image-tasks",
-    );
-    this.worker = new Worker<TaskQueueJobData>(
-      queueName,
-      (job) => this.process(job),
-      {
-        connection: this.connection,
-        concurrency: this.config.get<number>("tasks.workerConcurrency", 50),
-      },
-    );
-    const batchQueueName = this.config.get<string>(
-      "tasks.batchQueueName",
-      "yunwu-image-batch-tasks",
-    );
-    this.batchWorker = new Worker<TaskQueueJobData>(
-      batchQueueName,
-      (job) => this.process(job),
-      {
-        connection: this.connection,
-        concurrency: this.config.get<number>("tasks.batchWorkerConcurrency", 2),
-      },
-    );
+    this.taskQueue.setProcessor((taskId) => this.taskExecution.execute(taskId));
+    const stats = this.taskQueue.getStats();
     this.logger.log(
-      `Task workers started for queues ${queueName} and ${batchQueueName}.`,
+      `In-process task worker started (concurrency=${stats.concurrency}, batchConcurrency=${stats.batchConcurrency}).`,
     );
-    this.worker.on("failed", (job, error) => {
-      this.logger.error(
-        `Task job ${job?.id ?? "unknown"} failed: ${error.message}`,
-      );
-    });
-    this.worker.on("error", (error) => {
-      this.logger.error(`Task worker error: ${error.message}`);
-    });
-    this.batchWorker.on("failed", (job, error) => {
-      this.logger.error(
-        `Batch task job ${job?.id ?? "unknown"} failed: ${error.message}`,
-      );
-    });
-    this.batchWorker.on("error", (error) => {
-      this.logger.error(`Batch task worker error: ${error.message}`);
-    });
-  }
-
-  async onModuleDestroy() {
-    await this.worker?.close();
-    await this.batchWorker?.close();
-    this.connection?.off("error", this.handleConnectionError);
-    this.connection?.disconnect();
-  }
-
-  private async process(job: Job<TaskQueueJobData>) {
-    if (job.name !== TASK_QUEUE_JOB_NAME) {
-      this.logger.warn(`Skipping unknown task job: ${job.name}`);
-      return;
-    }
-
-    await this.taskExecution.execute(job.data.taskId);
   }
 }

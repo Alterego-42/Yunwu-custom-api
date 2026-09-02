@@ -8,6 +8,7 @@ import {
   YUNWU_MODEL_DEFINITIONS,
   getYunwuModelDefinition,
 } from "../src/openai-compatible/yunwu-model-registry";
+import { getProviderRoute } from "../src/openai-compatible/provider-route-registry";
 
 const NOW = new Date("2026-04-24T08:00:00.000Z");
 
@@ -147,6 +148,7 @@ function createHarness(
     assetUpdate: [] as Array<Record<string, unknown>>,
     assetFindMany: [] as Array<Record<string, unknown>>,
     taskFindMany: [] as Array<Record<string, unknown>>,
+    providerKeyWrites: [] as Array<{ routeId: string; apiKey: string | null }>,
     enqueued: [] as Array<{ taskId: string; source?: string }>,
     batchEnqueued: [] as Array<{
       taskId: string;
@@ -297,8 +299,17 @@ function createHarness(
     listForTask: async () => [],
   };
   const openaiCompatible = {
-    getProviderProfile: () => ({ mode: "mock" }),
-    getBaseConfig: () => ({ hasApiKey: false }),
+    providerType: "openai-compatible" as const,
+    providerId: "openai-compatible",
+    baseUrlConfigurable: false,
+    modelDefinitions: getProviderRoute("yunwu").modelDefinitions,
+    defaultModelIds: getProviderRoute("yunwu").defaultModelIds,
+    getModelDefinition: (modelId: string) =>
+      getProviderRoute("yunwu").modelDefinitions.find(
+        (model) => model.id === modelId,
+      ),
+    getProviderProfile: () => ({ mode: "mock", baseUrl: "https://yunwu.ai" }),
+    getBaseConfig: () => ({ hasApiKey: false, baseUrl: "https://yunwu.ai" }),
     checkProviderModels: async () => ({ remoteModelIds: [] }),
     createImageTask: async () => {
       throw new Error("not used");
@@ -319,12 +330,54 @@ function createHarness(
     getBaseUrl: async () => "https://yunwu.ai",
   };
 
+  const routeSecrets = new Map<string, string | undefined>();
+  const readLegacySecret = async () => {
+    const rows = (await (prisma as { $queryRaw?: (q: unknown) => Promise<unknown> })
+      .$queryRaw?.({ values: [] })) as
+      | Array<{ providerApiKey?: string | null }>
+      | undefined;
+    return rows?.[0]?.providerApiKey?.trim() || undefined;
+  };
+  const providerCredentials = {
+    assertRoute: (routeId: string) => {
+      if (!["yunwu", "anyaigc", "apixo"].includes(routeId)) {
+        throw new BadRequestException("Unsupported provider route.");
+      }
+      return routeId;
+    },
+    getSecretForExecution: async (_userId: string, routeId: string) =>
+      routeSecrets.has(routeId) ? routeSecrets.get(routeId) : readLegacySecret(),
+    getStatus: async (_userId: string, routeId: string) => {
+      const secret = routeSecrets.has(routeId)
+        ? routeSecrets.get(routeId)
+        : await readLegacySecret();
+      return {
+        providerRouteId: routeId,
+        configured: Boolean(secret),
+        ...(secret ? { maskedApiKey: `${secret.slice(0, 4)}...${secret.slice(-4)}` } : {}),
+      };
+    },
+    setSecret: async (_userId: string, routeId: string, apiKey: string) => {
+      providerCredentials.assertRoute(routeId);
+      routeSecrets.set(routeId, apiKey);
+      calls.providerKeyWrites.push({ routeId, apiKey });
+      return { providerRouteId: routeId, configured: true };
+    },
+    clearSecret: async (_userId: string, routeId: string) => {
+      providerCredentials.assertRoute(routeId);
+      routeSecrets.set(routeId, undefined);
+      calls.providerKeyWrites.push({ routeId, apiKey: null });
+      return { providerRouteId: routeId, configured: false };
+    },
+  };
+
   const service = new ApiService(
     prisma,
     taskQueue as any,
     taskEvents as any,
     conversationEvents as any,
     openaiCompatible as any,
+    providerCredentials as any,
     providerConfig as any,
     providerState as any,
     providerAlerts as any,
@@ -333,7 +386,7 @@ function createHarness(
   return { service, calls };
 }
 
-test("onModuleInit registers Yunwu models with only the five requested defaults enabled", async () => {
+test("onModuleInit registers每条线路各自的模型，默认启用项互不串线", async () => {
   const { service, calls } = createHarness();
 
   await service.onModuleInit();
@@ -341,22 +394,33 @@ test("onModuleInit registers Yunwu models with only the five requested defaults 
   const creates = calls.modelCapabilityUpsert.map(
     (call) => call.create as Record<string, any>,
   );
-  const enabledModels = creates
-    .filter((create) => create.enabled)
-    .map((create) => create.model)
-    .sort();
+  const enabledFor = (provider: string) =>
+    creates
+      .filter((create) => create.provider === provider && create.enabled)
+      .map((create) => create.model)
+      .sort();
 
-  assert.deepEqual(enabledModels, [
-    "gemini-3-pro-image-preview",
-    "gemini-3.1-flash-image-preview",
-    "gpt-image-2",
-    "grok-4.2-image",
-    "grok-imagine-image-pro",
-  ].sort());
-  assert.ok(creates.some((create) => create.model === "flux-schnell"));
+  // Yunwu / AnyAIGC 共用 openai-compatible 上游，APIXO 是独立的异步任务上游。
+  assert.deepEqual(
+    enabledFor("openai-compatible"),
+    [...DEFAULT_YUNWU_MODEL_IDS].sort(),
+  );
+  assert.deepEqual(
+    enabledFor("apixo"),
+    [...getProviderRoute("apixo").defaultModelIds].sort(),
+  );
+  // 同一模型 id 在两条线路下各自登记一行，互不覆盖。
   assert.equal(
-    creates.find((create) => create.model === "flux-schnell")?.enabled,
-    false,
+    creates.filter((create) => create.model === "gpt-image-2").length,
+    2,
+  );
+  assert.ok(
+    creates.some(
+      (create) =>
+        create.provider === "openai-compatible" &&
+        create.model === "flux-schnell" &&
+        create.enabled === false,
+    ),
   );
 });
 
@@ -387,6 +451,7 @@ test("Yunwu model registry includes all GPT, Gemini, and Grok image models", () 
     "gemini-3-pro-image-preview",
     "gemini-3.1-flash-image-preview",
     "grok-4.2-image",
+    "grok-imagine-image",
     "grok-imagine-image-pro",
   ]);
   assert.ok(
@@ -396,7 +461,7 @@ test("Yunwu model registry includes all GPT, Gemini, and Grok image models", () 
   );
   assert.equal(
     YUNWU_MODEL_DEFINITIONS.filter((model) => model.defaultEnabled).length,
-    5,
+    DEFAULT_YUNWU_MODEL_IDS.length,
   );
   assert.equal(
     getYunwuModelDefinition("gpt-image-2")?.capabilities.includes("image.edit"),
@@ -429,14 +494,12 @@ test("getSettings returns user defaults from global base URL", async () => {
 
   const response = await service.getSettings(buildUser() as any);
 
-  assert.equal(response.settings.baseUrl, "https://yunwu.ai");
-  assert.deepEqual(response.settings.enabledModelIds.sort(), [
-    "gemini-3-pro-image-preview",
-    "gemini-3.1-flash-image-preview",
-    "gpt-image-2",
-    "grok-4.2-image",
-    "grok-imagine-image-pro",
-  ].sort());
+  assert.equal(response.settings.activeProviderRouteId, "apixo");
+  assert.equal(response.settings.baseUrl, getProviderRoute("apixo").baseUrl);
+  assert.deepEqual(
+    response.settings.enabledModelIds.sort(),
+    [...getProviderRoute("apixo").defaultModelIds].sort(),
+  );
   assert.deepEqual(response.settings.ui, {});
 });
 
@@ -490,9 +553,12 @@ test("checkUserApiKey uses the provided key and masks the response", async () =>
       ],
     },
   });
-  (service as any).openaiCompatible = {
-    checkProviderModels: async (input: Record<string, unknown>) => {
-      captured = input;
+  (service as any).imageProvider = {
+    checkProviderModels: async (
+      routeId: string,
+      input: Record<string, unknown>,
+    ) => {
+      captured = { routeId, ...input };
       return {
         baseUrlReachable: true,
         modelsSource: "configured",
@@ -504,7 +570,7 @@ test("checkUserApiKey uses the provided key and masks the response", async () =>
     apiKey: "sk-check-secret-123456",
   });
 
-  assert.equal(captured?.baseUrl, "https://api3.wlai.vip");
+  assert.equal(captured?.routeId, "yunwu");
   assert.equal(captured?.apiKey, "sk-check-secret-123456");
   assert.equal(calls.userSettingsPersist.length, 0);
   assert.equal(response.ok, true);
@@ -529,9 +595,12 @@ test("checkUserApiKey uses the saved key when no temporary key is provided", asy
       ],
     },
   });
-  (service as any).openaiCompatible = {
-    checkProviderModels: async (input: Record<string, unknown>) => {
-      captured = input;
+  (service as any).imageProvider = {
+    checkProviderModels: async (
+      routeId: string,
+      input: Record<string, unknown>,
+    ) => {
+      captured = { routeId, ...input };
       return {
         baseUrlReachable: true,
         modelsSource: "remote",
@@ -542,7 +611,7 @@ test("checkUserApiKey uses the saved key when no temporary key is provided", asy
 
   const response = await service.checkUserApiKey(buildUser() as any, {});
 
-  assert.equal(captured?.baseUrl, "https://yunwu.ai");
+  assert.equal(captured?.routeId, "yunwu");
   assert.equal(captured?.apiKey, "sk-saved-secret-abcdef");
   assert.equal(calls.userSettingsPersist.length, 0);
   assert.equal(response.ok, true);
@@ -566,7 +635,7 @@ test("checkUserApiKey returns an explicit failure when no key is available", asy
       ],
     },
   });
-  (service as any).openaiCompatible = {
+  (service as any).imageProvider = {
     checkProviderModels: async () => {
       checkCalled = true;
       throw new Error("should not probe without a user API key");
@@ -600,7 +669,7 @@ test("checkUserApiKey does not leak invalid keys in failed check responses", asy
       ],
     },
   });
-  (service as any).openaiCompatible = {
+  (service as any).imageProvider = {
     checkProviderModels: async () => ({
       baseUrlReachable: true,
       modelsSource: "unavailable",
@@ -642,11 +711,183 @@ test("updateSettings persists user baseUrl, enabled models, and ui payload", asy
     ui: { density: "compact" },
   });
 
-  assert.equal(response.settings.baseUrl, "https://api3.wlai.vip");
+  assert.equal(response.settings.activeProviderRouteId, "yunwu");
+  assert.equal(response.settings.baseUrl, getProviderRoute("yunwu").baseUrl);
   assert.ok(response.settings.enabledModelIds.includes("gpt-image-1"));
   assert.ok(response.settings.enabledModelIds.includes("gpt-image-2"));
   assert.deepEqual(response.settings.ui, { density: "compact" });
-  assert.ok(persistedValues.includes("https://api3.wlai.vip"));
+  assert.ok(persistedValues.includes(getProviderRoute("yunwu").baseUrl));
+  assert.ok(persistedValues.includes("yunwu"));
+});
+
+test("每条线路的 API key 相互独立，切换线路不会带走上一条的密钥", async () => {
+  let storedRoute = "apixo";
+  const { service, calls } = createHarness({
+    raw: {
+      $queryRaw: async () => [
+        {
+          activeProviderRouteId: storedRoute,
+          baseUrl: getProviderRoute(storedRoute as "apixo").baseUrl,
+          providerApiKey: null,
+          enabledModelIds: [],
+          enabledModelIdsByRoute: null,
+          ui: {},
+        },
+      ],
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        storedRoute = String(query.values?.[3] ?? storedRoute);
+        return 1;
+      },
+    },
+  });
+
+  // 在 APIXO 线路上存一把 key。
+  const apixoStatus = await service.updateProviderRouteApiKey(
+    buildUser() as any,
+    "apixo",
+    "sk-apixo-secret-0001",
+  );
+  assert.equal(apixoStatus.configured, true);
+
+  // 切到 Yunwu 线路：该线路仍然是未配置状态。
+  const switched = await service.updateSettings(buildUser() as any, {
+    activeProviderRouteId: "yunwu",
+  });
+  assert.equal(switched.settings.activeProviderRouteId, "yunwu");
+  assert.equal(switched.settings.providerApiKey.configured, false);
+
+  const routes = Object.fromEntries(
+    switched.settings.providerRoutes.map((route) => [
+      route.id,
+      route.credential.configured,
+    ]),
+  );
+  assert.equal(routes.apixo, true);
+  assert.equal(routes.yunwu, false);
+  assert.equal(routes.anyaigc, false);
+
+  // 清空 Yunwu 不会影响 APIXO 已保存的密钥。
+  await service.clearProviderRouteApiKey(buildUser() as any, "yunwu");
+  assert.deepEqual(
+    calls.providerKeyWrites.map((write) => write.routeId),
+    ["apixo", "yunwu"],
+  );
+
+  await assert.rejects(
+    () =>
+      service.updateProviderRouteApiKey(
+        buildUser() as any,
+        "not-a-route",
+        "sk-x",
+      ),
+    (error: unknown) => error instanceof BadRequestException,
+  );
+});
+
+test("切换线路时各线路的启用模型互不覆盖", async () => {
+  // APIXO 与 Yunwu 的模型清单完全不同，切换后必须各自保留选择。
+  let stored: Record<string, unknown> = {
+    activeProviderRouteId: "apixo",
+    baseUrl: getProviderRoute("apixo").baseUrl,
+    providerApiKey: null,
+    enabledModelIds: [],
+    enabledModelIdsByRoute: null,
+    ui: {},
+  };
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [stored],
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        const values = query.values ?? [];
+        stored = {
+          ...stored,
+          baseUrl: values[2],
+          activeProviderRouteId: values[3],
+          enabledModelIds: JSON.parse(String(values[5])),
+          enabledModelIdsByRoute: JSON.parse(String(values[6])),
+        };
+        return 1;
+      },
+    },
+  });
+
+  const apixoModel = getProviderRoute("apixo").modelDefinitions.find(
+    (model) => !getProviderRoute("apixo").defaultModelIds.includes(model.id),
+  )!.id;
+  const onApixo = await service.updateSettings(buildUser() as any, {
+    enabledModelIds: [apixoModel],
+  });
+  assert.ok(onApixo.settings.enabledModelIds.includes(apixoModel));
+
+  const apixoModelIds = new Set(
+    getProviderRoute("apixo").modelDefinitions.map((model) => model.id),
+  );
+  const yunwuOnlyModel = getProviderRoute("yunwu").modelDefinitions.find(
+    (model) => !apixoModelIds.has(model.id),
+  )!.id;
+  const onYunwu = await service.updateSettings(buildUser() as any, {
+    activeProviderRouteId: "yunwu",
+    enabledModelIds: [yunwuOnlyModel],
+  });
+  assert.ok(onYunwu.settings.enabledModelIds.includes(yunwuOnlyModel));
+  // Yunwu 线路不应出现 APIXO 独有的模型。
+  assert.ok(!onYunwu.settings.enabledModelIds.includes(apixoModel));
+
+  const backOnApixo = await service.updateSettings(buildUser() as any, {
+    activeProviderRouteId: "apixo",
+  });
+  assert.ok(backOnApixo.settings.enabledModelIds.includes(apixoModel));
+  assert.ok(!backOnApixo.settings.enabledModelIds.includes(yunwuOnlyModel));
+});
+
+test("切到 APIXO 线路时不因带上 Yunwu 模型列表而报错", async () => {
+  // 复现：旧客户端切线路时会把当前线路的 enabledModelIds 一起 PATCH 过来。
+  let stored: Record<string, unknown> = {
+    activeProviderRouteId: "yunwu",
+    baseUrl: getProviderRoute("yunwu").baseUrl,
+    providerApiKey: null,
+    enabledModelIds: ["gemini-3-pro-image-preview"],
+    enabledModelIdsByRoute: { yunwu: ["gemini-3-pro-image-preview"] },
+    ui: {},
+  };
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [stored],
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        const values = query.values ?? [];
+        stored = {
+          ...stored,
+          baseUrl: values[2],
+          activeProviderRouteId: values[3],
+          enabledModelIds: JSON.parse(String(values[5])),
+          enabledModelIdsByRoute: JSON.parse(String(values[6])),
+        };
+        return 1;
+      },
+    },
+  });
+
+  const switched = await service.updateSettings(buildUser() as any, {
+    activeProviderRouteId: "apixo",
+    baseUrl: getProviderRoute("apixo").baseUrl,
+    enabledModelIds: ["gemini-3-pro-image-preview"],
+  });
+
+  assert.equal(switched.settings.activeProviderRouteId, "apixo");
+  // APIXO 不认识的模型被丢掉，而不是整个请求失败。
+  assert.ok(
+    !switched.settings.enabledModelIds.includes("gemini-3-pro-image-preview"),
+  );
+  assert.ok(switched.settings.enabledModelIds.length > 0);
+
+  // 同一线路内提交未知模型仍然报错。
+  await assert.rejects(
+    () =>
+      service.updateSettings(buildUser() as any, {
+        enabledModelIds: ["definitely-not-a-model"],
+      }),
+    (error: unknown) => error instanceof BadRequestException,
+  );
 });
 
 test("updateSettings rejects unsupported baseUrl and unknown models", async () => {
@@ -659,7 +900,7 @@ test("updateSettings rejects unsupported baseUrl and unknown models", async () =
       }),
     (error: unknown) => {
       assert(error instanceof BadRequestException);
-      assert.match((error as Error).message, /Unsupported Yunwu base_url/);
+      assert.match((error as Error).message, /Unsupported provider base URL/);
       return true;
     },
   );
@@ -671,7 +912,7 @@ test("updateSettings rejects unsupported baseUrl and unknown models", async () =
       }),
     (error: unknown) => {
       assert(error instanceof BadRequestException);
-      assert.match((error as Error).message, /Unknown Yunwu model id/);
+      assert.match((error as Error).message, /Unknown model id for the/);
       return true;
     },
   );
@@ -905,8 +1146,8 @@ test("createTask lazily creates a conversation and queues the task", async () =>
     [upload.id],
   );
   assert.equal(
-    (calls.taskCreate[0]?.input as Record<string, unknown>).providerBaseUrl,
-    "https://api3.wlai.vip",
+    (calls.taskCreate[0]?.input as Record<string, unknown>).providerRouteId,
+    "yunwu",
   );
   assert.equal(response.conversation.id, lazyConversation.id);
   assert.equal(response.task.conversationId, lazyConversation.id);
@@ -1490,6 +1731,7 @@ test("retryTask keeps a one-slot batch retry round marked as batch", async () =>
       assetIds: [],
       params: { size: "1024x1024" },
       batchCount: 2,
+      providerBaseUrl: "https://api3.wlai.vip",
     },
     output: {
       batchSize: 2,
@@ -1555,6 +1797,8 @@ test("retryTask keeps a one-slot batch retry round marked as batch", async () =>
     { taskId: "task-batch-retry-one", source: "batch-retry", options: undefined },
   ]);
   assert.equal(response.retriedFromTaskId, sourceTask.id);
+  assert.equal(retryTaskInput?.providerBaseUrl, "https://api3.wlai.vip");
+  assert.equal(retryTaskInput?.batchCount, 1);
   assert.equal(response.task.batch?.isBatch, true);
   assert.equal(response.task.batch?.batchSize, 1);
   assert.equal(response.task.batchItems?.length, 1);

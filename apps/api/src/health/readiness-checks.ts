@@ -1,10 +1,9 @@
 import type { PrismaClient } from "@prisma/client";
-import IORedis from "ioredis";
 
 export type DependencyState = "ok" | "error" | "skipped";
 
 export interface DependencyCheckResult {
-  name: "postgres" | "redis" | "storage";
+  name: "database" | "queue" | "storage";
   status: DependencyState;
   latencyMs: number;
   message: string;
@@ -18,11 +17,7 @@ export interface ReadinessReport {
 }
 
 export interface ReadinessEnvironment {
-  redisUrl?: string;
   storageMode: string;
-  minioEndpoint?: string;
-  minioPort: number;
-  minioUseSsl: boolean;
 }
 
 type PrismaQueryable = Pick<PrismaClient, "$queryRawUnsafe">;
@@ -31,80 +26,49 @@ export function createReadinessEnvironmentFromRecord(
   values: Record<string, string | undefined>,
 ): ReadinessEnvironment {
   return {
-    redisUrl: values.REDIS_URL,
     storageMode: values.STORAGE_MODE ?? "local",
-    minioEndpoint: values.MINIO_ENDPOINT,
-    minioPort: Number(values.MINIO_PORT ?? 9000),
-    minioUseSsl: values.MINIO_USE_SSL === "true",
   };
 }
 
 export async function checkDatabaseReadiness(
   prisma: PrismaQueryable,
 ): Promise<DependencyCheckResult> {
-  return measure("postgres", async () => {
+  return measure("database", async () => {
     await prisma.$queryRawUnsafe("SELECT 1");
-    return "PostgreSQL query succeeded.";
+    return "SQLite query succeeded.";
   });
 }
 
-export async function checkRedisReadiness(
-  redisUrl?: string,
-): Promise<DependencyCheckResult> {
-  if (!redisUrl) {
+export function checkQueueReadiness(stats: {
+  processorRegistered: boolean;
+  pending: number;
+  running: number;
+}): DependencyCheckResult {
+  if (!stats.processorRegistered) {
     return {
-      name: "redis",
-      status: "error",
+      name: "queue",
+      status: "skipped",
       latencyMs: 0,
-      message: "REDIS_URL is not configured.",
+      message: "Task worker disabled; queue processor not registered.",
     };
   }
 
-  const client = new IORedis(redisUrl, {
-    connectTimeout: 2_000,
-    enableReadyCheck: true,
-    lazyConnect: true,
-    maxRetriesPerRequest: 1,
-  });
-
-  try {
-    return await measure("redis", async () => {
-      await client.connect();
-      const response = await client.ping();
-      if (response !== "PONG") {
-        throw new Error(`Unexpected Redis ping response: ${response}`);
-      }
-
-      return "Redis ping succeeded.";
-    });
-  } finally {
-    client.disconnect();
-  }
+  return {
+    name: "queue",
+    status: "ok",
+    latencyMs: 0,
+    message: `In-process queue ready (pending=${stats.pending}, running=${stats.running}).`,
+  };
 }
 
-export async function checkObjectStorageReadiness(
+export function checkObjectStorageReadiness(
   environment: ReadinessEnvironment,
-): Promise<DependencyCheckResult> {
+): DependencyCheckResult {
   if (environment.storageMode === "local") {
     return skipped("storage", "Local storage mode enabled.");
   }
 
-  if (!environment.minioEndpoint) {
-    return skipped("storage", "Remote S3 probe not configured.");
-  }
-
-  const probeUrl = buildMinioHealthUrl(environment);
-  return measure("storage", async () => {
-    const response = await fetch(probeUrl, {
-      signal: AbortSignal.timeout(2_000),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Object storage health responded with ${response.status}.`);
-    }
-
-    return `Object storage probe succeeded at ${probeUrl}.`;
-  });
+  return skipped("storage", "Remote object storage probe not configured.");
 }
 
 export function createReadinessReport(
@@ -153,26 +117,6 @@ function skipped(
     latencyMs: 0,
     message,
   };
-}
-
-function buildMinioHealthUrl(environment: ReadinessEnvironment) {
-  const protocol = environment.minioUseSsl ? "https" : "http";
-  const endpoint = environment.minioEndpoint ?? "127.0.0.1";
-
-  if (/^https?:\/\//.test(endpoint)) {
-    const url = new URL(endpoint);
-    if (!url.port) {
-      url.port = environment.minioPort.toString();
-    }
-    url.pathname = "/minio/health/live";
-    url.search = "";
-    return url.toString();
-  }
-
-  const host = endpoint.includes(":")
-    ? endpoint
-    : `${endpoint}:${environment.minioPort}`;
-  return `${protocol}://${host}/minio/health/live`;
 }
 
 function getErrorMessage(error: unknown) {

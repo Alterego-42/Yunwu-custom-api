@@ -460,6 +460,77 @@ test("createImageTask reports transport errors with provider request stage", asy
   }
 });
 
+test("createImageTask reports connection timeouts separately from request timeouts", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    const error = new Error("fetch failed") as Error & { cause?: unknown };
+    error.cause = Object.assign(new Error("Connect Timeout Error"), {
+      code: "UND_ERR_CONNECT_TIMEOUT",
+    });
+    throw error;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "request");
+        assert.equal(error.responseSummary.errorKind, "connect_timeout");
+        assert.equal(
+          error.responseSummary.fetchCauseCode,
+          "UND_ERR_CONNECT_TIMEOUT",
+        );
+        assert.equal(error.responseSummary.endpointPath, "/v1/images/generations");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("createImageTask keeps generic request timeouts distinct", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new DOMException("The operation timed out", "TimeoutError");
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await assert.rejects(
+      () =>
+        service.createImageTask({
+          capability: "image.generate",
+          model: "gpt-image-2",
+          prompt: "test",
+        }),
+      (error: unknown) => {
+        assert(error instanceof OpenAICompatibleRequestError);
+        assert.equal(error.responseSummary.stage, "request");
+        assert.equal(error.responseSummary.errorKind, "timeout");
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("createImageTask reports invalid JSON provider responses", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async () =>

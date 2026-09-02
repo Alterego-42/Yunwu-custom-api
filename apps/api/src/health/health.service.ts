@@ -1,10 +1,11 @@
 import { Injectable } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { PrismaService } from "../prisma/prisma.service";
+import { TaskQueueService } from "../tasks/task-queue.service";
 import {
   checkDatabaseReadiness,
   checkObjectStorageReadiness,
-  checkRedisReadiness,
+  checkQueueReadiness,
   createReadinessEnvironmentFromRecord,
   createReadinessReport,
 } from "./readiness-checks";
@@ -14,6 +15,7 @@ export class HealthService {
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly taskQueue: TaskQueueService,
   ) {}
 
   getLiveness() {
@@ -26,20 +28,14 @@ export class HealthService {
 
   async getReadiness() {
     const environment = createReadinessEnvironmentFromRecord({
-      REDIS_URL: this.config.get<string>("redisUrl"),
       STORAGE_MODE: this.config.get<string>("storage.mode"),
-      MINIO_ENDPOINT: this.config.get<string>("minio.endpoint"),
-      MINIO_PORT: this.config.get<number>("minio.port")?.toString(),
-      MINIO_USE_SSL: this.config.get<boolean>("minio.useSsl")
-        ? "true"
-        : "false",
     });
 
-    const checks = await Promise.all([
-      checkDatabaseReadiness(this.prisma),
-      checkRedisReadiness(environment.redisUrl),
+    const checks = [
+      await checkDatabaseReadiness(this.prisma),
+      checkQueueReadiness(this.taskQueue.getStats()),
       checkObjectStorageReadiness(environment),
-    ]);
+    ];
 
     return createReadinessReport("@yunwu/api", checks);
   }

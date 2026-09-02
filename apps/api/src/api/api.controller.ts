@@ -10,6 +10,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   Sse,
@@ -61,8 +62,8 @@ import { RetryTaskDto } from "./dto/retry-task.dto";
 import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
 import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
-import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";
-import {
+import { UpdateProviderRouteApiKeyDto } from "./dto/update-provider-route-api-key.dto";
+import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";import {
   AppLoggerService,
   type AppLogLevelQuery,
 } from "../logging/app-logger.service";
@@ -110,6 +111,32 @@ export class ApiController {
     @Body() input: CheckUserApiKeyDto,
   ): Promise<UserApiKeyCheckResponse> {
     return this.api.checkUserApiKey(user, input);
+  }
+
+  @Put("settings/provider-routes/:routeId/api-key")
+  updateProviderRouteApiKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("routeId") routeId: string,
+    @Body() input: UpdateProviderRouteApiKeyDto,
+  ) {
+    return this.api.updateProviderRouteApiKey(user, routeId, input.apiKey);
+  }
+
+  @Delete("settings/provider-routes/:routeId/api-key")
+  clearProviderRouteApiKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("routeId") routeId: string,
+  ) {
+    return this.api.clearProviderRouteApiKey(user, routeId);
+  }
+
+  @Post("settings/provider-routes/:routeId/api-key/check")
+  checkProviderRouteApiKey(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param("routeId") routeId: string,
+    @Body() input: CheckUserApiKeyDto,
+  ) {
+    return this.api.checkProviderRouteApiKey(user, routeId, input.apiKey);
   }
 
   @Get("conversations")

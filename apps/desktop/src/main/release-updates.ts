@@ -22,6 +22,16 @@ export type UpdatePhase =
   | "applied"
   | "error";
 
+export type PortableAsset = {
+  name: string;
+  downloadUrl: string;
+  sha256: string;
+  size: number;
+};
+
+/** 端内更新的细分阶段，供界面显示进度。 */
+export type UpdateStage = "download" | "verify" | "extract" | "stage" | "restart";
+
 export type UpdateStatus = {
   phase: UpdatePhase;
   currentDesktopVersion: string;
@@ -31,7 +41,13 @@ export type UpdateStatus = {
   releaseUrl?: string;
   canOpenReleasePage: boolean;
   canApplyImageUpdate: boolean;
+  /** 满足端内更新条件：清单提供了带 sha256 的 portable 包，且安装目录可写。 */
+  canApplyDesktopUpdate: boolean;
   requiresDesktopUpdate: boolean;
+  portableAsset?: PortableAsset;
+  stage?: UpdateStage;
+  downloadedBytes?: number;
+  totalBytes?: number;
   message: string;
   checkedAt?: string;
   error?: string;
@@ -50,6 +66,7 @@ export type ReleaseState = {
     tag: string;
     releaseUrl: string;
   } | null;
+  lastPortableAsset: PortableAsset | null;
   lastError: string | null;
 };
 
@@ -155,6 +172,69 @@ export function compareVersions(left: string, right: string) {
   return 0;
 }
 
+const githubReleaseDownloadPathPattern = new RegExp(
+  `^/${repoOwner}/${repoName}/releases/download/v\\d+\\.\\d+\\.\\d+/[^/]+$`,
+  "i"
+);
+
+/** 下载地址只允许本仓库 Release 的 portable 资产。 */
+export function ensureAllowedDownloadUrl(value: string) {
+  const url = new URL(value);
+  if (
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    !githubReleaseDownloadPathPattern.test(url.pathname)
+  ) {
+    throw new Error("Download URL is not an allowed GitHub release asset URL.");
+  }
+  ensureAllowedAssetName(decodeURIComponent(url.pathname.split("/").pop() ?? ""));
+  return url.toString();
+}
+
+export function buildPortableDownloadUrl(tag: string, assetName: string) {
+  return ensureAllowedDownloadUrl(
+    `https://github.com/${repoOwner}/${repoName}/releases/download/${tag}/${encodeURIComponent(assetName)}`
+  );
+}
+
+function normalizePortableAsset(value: unknown): PortableAsset | null {
+  if (!isRecord(value)) return null;
+  const name = asString(value.name);
+  const sha256 = asString(value.sha256);
+  const downloadUrl = asString(value.downloadUrl);
+  if (!name || !sha256 || !downloadUrl) return null;
+  try {
+    return {
+      name: ensureAllowedAssetName(name),
+      downloadUrl: ensureAllowedDownloadUrl(downloadUrl),
+      sha256: /^[0-9a-f]{64}$/i.test(sha256) ? sha256.toLowerCase() : (() => {
+        throw new Error("sha256 is not a 64-hex digest.");
+      })(),
+      size: asNumber(value.size, 0)
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 清单里的 portable 资产必须带 sha256，否则不允许端内更新。 */
+function portableAssetFromManifest(manifest: ReleaseManifest): PortableAsset | null {
+  const asset = manifest.desktop.portableAsset;
+  if (!asset?.sha256) return null;
+  return normalizePortableAsset({
+    name: asset.name,
+    sha256: asset.sha256,
+    size: asset.size,
+    downloadUrl: (() => {
+      try {
+        return buildPortableDownloadUrl(manifest.tag, asset.name);
+      } catch {
+        return undefined;
+      }
+    })()
+  });
+}
+
 export function getReleaseStatePath(runtimeDir: string) {
   return join(runtimeDir, "release-state.json");
 }
@@ -170,6 +250,7 @@ export function defaultReleaseState(appVersion: string): ReleaseState {
     lastCheckedAt: null,
     lastAppliedAt: null,
     lastKnownLatest: null,
+    lastPortableAsset: null,
     lastError: null
   };
 }
@@ -201,6 +282,7 @@ function normalizeReleaseState(value: unknown, appVersion: string): ReleaseState
       latestTag && latestVersion && latestReleaseUrl
         ? { version: latestVersion, tag: latestTag, releaseUrl: latestReleaseUrl }
         : null,
+    lastPortableAsset: normalizePortableAsset(value.lastPortableAsset),
     lastError: asString(value.lastError) ?? null
   };
 }
@@ -230,6 +312,7 @@ export function createInitialUpdateStatus(state: ReleaseState): UpdateStatus {
     currentImageTag: state.currentImageTag,
     canOpenReleasePage: Boolean(state.lastKnownLatest?.releaseUrl),
     canApplyImageUpdate: false,
+    canApplyDesktopUpdate: false,
     requiresDesktopUpdate: false,
     ...(state.lastKnownLatest
       ? {
@@ -408,6 +491,7 @@ async function fetchLatestManifest() {
 
 function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateStatus {
   const checkedAt = new Date().toISOString();
+  const portableAsset = portableAssetFromManifest(manifest);
   const latestIsNewerThanDesktop = compareVersions(manifest.version, state.desktopVersion) > 0;
   const latestIsNewerThanImage = compareVersions(manifest.version, state.currentImageTag) > 0;
   const desktopMeetsMinimum = compareVersions(state.desktopVersion, manifest.desktop.minSupportedVersion) >= 0;
@@ -426,6 +510,7 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "up-to-date",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: false,
       requiresDesktopUpdate: false,
       message: "当前已是最新版本。"
     };
@@ -436,6 +521,7 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "blocked",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: false,
       requiresDesktopUpdate: false,
       message: `发现新版 ${manifest.tag}，此版本需要手动处理，请查看发布说明。`
     };
@@ -446,8 +532,12 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "desktop-update-required",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: Boolean(portableAsset),
       requiresDesktopUpdate: true,
-      message: `发现新版 ${manifest.tag}，需要下载新的桌面包。`
+      ...(portableAsset ? { portableAsset } : {}),
+      message: portableAsset
+        ? `发现新版 ${manifest.tag}，可直接在应用内下载并更新。`
+        : `发现新版 ${manifest.tag}，需要手动下载新的桌面包。`
     };
   }
 
@@ -460,6 +550,7 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "up-to-date",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: false,
       requiresDesktopUpdate: false,
       message: "当前已是最新版本。"
     };
@@ -473,8 +564,12 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "desktop-update-required",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: Boolean(portableAsset),
       requiresDesktopUpdate: true,
-      message: `发现新版 ${manifest.tag}，需要下载新的桌面包。`
+      ...(portableAsset ? { portableAsset } : {}),
+      message: portableAsset
+        ? `发现新版 ${manifest.tag}，可直接在应用内下载并更新。`
+        : `发现新版 ${manifest.tag}，需要手动下载新的桌面包。`
     };
   }
 
@@ -483,6 +578,7 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
       ...base,
       phase: "image-update-available",
       canApplyImageUpdate: false,
+      canApplyDesktopUpdate: false,
       requiresDesktopUpdate: false,
       message: `发现可用服务镜像 ${manifest.tag}。当前版本仅提示更新，暂不自动切换镜像。`
     };
@@ -492,6 +588,7 @@ function classifyUpdate(state: ReleaseState, manifest: ReleaseManifest): UpdateS
     ...base,
     phase: "blocked",
     canApplyImageUpdate: false,
+    canApplyDesktopUpdate: false,
     requiresDesktopUpdate: false,
     message: "发现新版，但当前桌面壳无法确认安全更新路径，请查看发布说明。"
   };
@@ -509,6 +606,7 @@ export async function checkForUpdates(runtimeDir: string, state: ReleaseState) {
         tag: manifest.tag,
         releaseUrl: manifest.releaseUrl
       },
+      lastPortableAsset: status.portableAsset ?? null,
       lastError: null
     };
     await saveReleaseState(runtimeDir, nextState);

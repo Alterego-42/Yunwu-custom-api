@@ -1,6 +1,6 @@
 {
   "name": "@yunwu/desktop",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "description": "Yunwu desktop shell",
   "main": "dist/main/main.js",
@@ -8,8 +8,10 @@
     "dev": "pnpm build && electron .",
     "build": "tsc -p tsconfig.json && node scripts/copy-renderer.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "package": "pnpm build && electron-builder --win zip",
-    "package:dir": "pnpm build && electron-builder --win dir"
+    "prepare-server": "node scripts/prepare-server.mjs",
+    "package": "pnpm build && pnpm prepare-server && electron-builder --win zip",
+    "package:dir": "pnpm build && pnpm prepare-server && electron-builder --win dir",
+    "test": "pnpm build && node --test test/release-updates.test.cjs"
   },
   "dependencies": {
     "electron-log": "^5.4.3"
@@ -34,12 +36,8 @@
     ],
     "extraResources": [
       {
-        "from": "../../infra",
-        "to": "infra"
-      },
-      {
-        "from": "resources",
-        "to": "desktop"
+        "from": "resources/server",
+        "to": "server"
       }
     ],
     "win": {

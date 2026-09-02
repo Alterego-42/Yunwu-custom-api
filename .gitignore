@@ -60,3 +60,14 @@ builder-effective-config.yaml
 # Local desktop user runtime/state
 Yunwu-Desktop-Data/
 yunwu-desktop-data/
+
+# 本机运行时数据（SQLite 库里含真实 API key，绝不能进仓库）
+/data/
+apps/api/data/
+apps/api/prisma/data/
+
+# 桌面打包时组装的内置服务负载（体量大且由构建生成）
+apps/desktop/resources/server/
+
+# 本地 IDE / 工具配置
+.claude/

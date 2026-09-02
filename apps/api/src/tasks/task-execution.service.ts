@@ -4,15 +4,15 @@ import {
   type Asset,
   type Task,
   type TaskBatchItem,
-  type TaskStatus,
 } from "@prisma/client";
+import type { TaskStatus } from "@yunwu/shared";
 import { randomUUID } from "node:crypto";
 import { AssetStorageService } from "../api/storage/asset-storage.service";
 import { ConversationEventsService } from "../api/conversation-events.service";
-import {
-  OpenAICompatibleRequestError,
-  OpenAICompatibleService,
-} from "../openai-compatible/openai-compatible.service";
+import { ImageProviderService } from "../openai-compatible/image-provider.service";
+import { UserProviderCredentialsService } from "../openai-compatible/user-provider-credentials.service";
+import { type ProviderRouteId } from "../openai-compatible/provider-route-registry";
+import { OpenAICompatibleRequestError } from "../openai-compatible/openai-compatible.service";
 import { ProviderAlertsService } from "../openai-compatible/provider-alerts.service";
 import { ProviderOperationalStateService } from "../openai-compatible/provider-operational-state.service";
 import { PrismaService } from "../prisma/prisma.service";
@@ -26,6 +26,7 @@ interface TaskInputShape {
   assetIds?: string[];
   params?: Record<string, unknown>;
   providerBaseUrl?: string;
+  providerRouteId?: ProviderRouteId;
   batchCount?: number;
 }
 
@@ -58,7 +59,8 @@ export class TaskExecutionService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly openaiCompatible: OpenAICompatibleService,
+    private readonly imageProvider: ImageProviderService,
+    private readonly providerCredentials: UserProviderCredentialsService,
     private readonly providerState: ProviderOperationalStateService,
     private readonly providerAlerts: ProviderAlertsService,
     private readonly conversationEvents: ConversationEventsService,
@@ -141,8 +143,15 @@ export class TaskExecutionService {
       });
       this.publishTaskUpdated(task.conversationId, task.id, "running");
 
-      const baseConfig = await this.openaiCompatible.getBaseConfig();
-      const providerApiKey = await this.getUserProviderApiKey(task.userId);
+      const providerRouteId = input.providerRouteId;
+      if (!providerRouteId) {
+        throw new Error("Legacy task has no provider route. Create a new task from current settings.");
+      }
+      const baseConfig = await this.imageProvider.getBaseConfig(providerRouteId);
+      const providerApiKey = await this.providerCredentials.getSecretForExecution(
+        task.userId,
+        providerRouteId,
+      );
       const requestSummary = this.buildProviderRequestSummary(
         {
           ...baseConfig,
@@ -157,7 +166,7 @@ export class TaskExecutionService {
         details: requestSummary,
       });
 
-      const result = await this.openaiCompatible.createImageTask({
+      const result = await this.imageProvider.createImageTask(providerRouteId, {
         capability,
         model: input.model ?? "gpt-image-1",
         prompt: input.prompt ?? "",
@@ -191,7 +200,7 @@ export class TaskExecutionService {
             width: result.width,
             height: result.height,
             mocked: result.mocked,
-            provider: "openai-compatible",
+            provider: this.imageProvider.providerId,
             responseSummary: result.responseSummary,
             storage: storedOutput.storage.kind,
             ...(storedOutput.storage.objectUrl
@@ -398,8 +407,15 @@ export class TaskExecutionService {
       });
       this.publishTaskUpdated(task.conversationId, task.id, "running");
 
-      const baseConfig = await this.openaiCompatible.getBaseConfig();
-      const providerApiKey = await this.getUserProviderApiKey(task.userId);
+      const providerRouteId = input.providerRouteId;
+      if (!providerRouteId) {
+        throw new Error("Legacy task has no provider route. Create a new task from current settings.");
+      }
+      const baseConfig = await this.imageProvider.getBaseConfig(providerRouteId);
+      const providerApiKey = await this.providerCredentials.getSecretForExecution(
+        task.userId,
+        providerRouteId,
+      );
       const requestSummary = this.buildProviderRequestSummary(
         {
           ...baseConfig,
@@ -646,11 +662,15 @@ export class TaskExecutionService {
     context: BatchExecutionContext,
   ) {
     try {
-      const result = await this.openaiCompatible.createImageTask({
+      const providerRouteId = context.input.providerRouteId;
+      if (!providerRouteId) {
+        throw new Error("Legacy task has no provider route. Create a new task from current settings.");
+      }
+      const result = await this.imageProvider.createImageTask(providerRouteId, {
         capability: context.capability,
         model: context.input.model ?? "gpt-image-1",
         prompt: context.input.prompt ?? "",
-        baseUrl: context.input.providerBaseUrl,
+        baseUrl: undefined,
         apiKey: context.providerApiKey,
         allowMock: false,
         inputAssets: context.orderedInputAssets.map((asset) => ({
@@ -678,7 +698,7 @@ export class TaskExecutionService {
             width: result.width,
             height: result.height,
             mocked: result.mocked,
-            provider: "openai-compatible",
+            provider: this.imageProvider.providerId,
             responseSummary: result.responseSummary,
             storage: storedOutput.storage.kind,
             ...(storedOutput.storage.objectUrl
@@ -859,21 +879,6 @@ export class TaskExecutionService {
       : {};
   }
 
-  private async getUserProviderApiKey(userId: string) {
-    const rows = await this.prisma.$queryRaw<
-      Array<{ providerApiKey: string | null }>
-    >(
-      Prisma.sql`
-        SELECT "provider_api_key" AS "providerApiKey"
-        FROM "user_settings"
-        WHERE "user_id" = ${userId}
-        LIMIT 1
-      `,
-    );
-
-    return rows[0]?.providerApiKey?.trim() || undefined;
-  }
-
   private asSupportedCapability(value: string): SupportedTaskCapability {
     return value === "image.edit" ? "image.edit" : "image.generate";
   }
@@ -956,7 +961,7 @@ export class TaskExecutionService {
     }
   }
 
-  private isTerminalStatus(status: TaskStatus) {
+  private isTerminalStatus(status: string) {
     return ["succeeded", "failed", "cancelled", "expired"].includes(status);
   }
 
@@ -980,12 +985,20 @@ export class TaskExecutionService {
   ) {
     const prompt = input.prompt ?? "";
 
+    const isApixo = this.imageProvider.providerType === "apixo";
+
     return {
       mode: baseConfig.hasApiKey ? "live" : "mock",
-      baseUrl: input.providerBaseUrl ?? baseConfig.baseUrl,
-      endpointPath: this.resolveProviderEndpointPath(capability, input.model),
-      model: input.model ?? "gpt-image-1",
-      providerBaseUrl: input.providerBaseUrl,
+      provider: this.imageProvider.providerId,
+      // APIXO 上游地址固定由环境变量控制，用户设置的 baseUrl 仅作用于 Yunwu 上游
+      baseUrl: isApixo
+        ? baseConfig.baseUrl
+        : (input.providerBaseUrl ?? baseConfig.baseUrl),
+      endpointPath: isApixo
+        ? `/generateTask/${input.model ?? "nano-banana"}`
+        : this.resolveProviderEndpointPath(capability, input.model),
+      model: input.model ?? (isApixo ? "nano-banana" : "gpt-image-1"),
+      providerBaseUrl: isApixo ? undefined : input.providerBaseUrl,
       capability,
       promptPreview: this.truncateText(prompt, 180),
       promptLength: prompt.length,
@@ -1078,6 +1091,20 @@ export class TaskExecutionService {
         ) || sanitizedMessage;
 
       if (errorStage === "request") {
+        if (errorKind === "connect_timeout") {
+          return {
+            title: "Provider unreachable",
+            detail:
+              "The service could not establish a connection to the image provider before the connection timeout.",
+            errorMessage:
+              "The connection to the image provider timed out. Check the provider base URL and network environment, then retry.",
+            category: "provider_unreachable",
+            retryable: true,
+            errorStage,
+            errorKind,
+          };
+        }
+
         if (errorKind === "timeout") {
           return {
             title: "Provider request timed out",

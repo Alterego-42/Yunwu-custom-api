@@ -41,10 +41,10 @@ export class ProviderConfigurationService {
     await this.prisma.$executeRaw(
       Prisma.sql`
         INSERT INTO "provider_configuration" ("id", "base_url", "updated_at")
-        VALUES (${PROVIDER_CONFIGURATION_ID}, ${normalized}, NOW())
+        VALUES (${PROVIDER_CONFIGURATION_ID}, ${normalized}, CURRENT_TIMESTAMP)
         ON CONFLICT ("id") DO UPDATE SET
           "base_url" = EXCLUDED."base_url",
-          "updated_at" = NOW()
+          "updated_at" = CURRENT_TIMESTAMP
       `,
     );
 

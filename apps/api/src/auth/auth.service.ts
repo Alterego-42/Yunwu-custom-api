@@ -246,13 +246,9 @@ export class AuthService implements OnModuleInit {
 
   private async findUserByEmail(email: string) {
     const normalizedEmail = this.normalizeEmail(email);
+    // SQLite 下 Prisma 不支持 mode: "insensitive"；email 在写入与查询时均已归一化为小写
     return this.prisma.user.findFirst({
-      where: {
-        email: {
-          equals: normalizedEmail,
-          mode: "insensitive",
-        },
-      },
+      where: { email: normalizedEmail },
     });
   }
 
@@ -266,8 +262,12 @@ export class AuthService implements OnModuleInit {
       displayName:
         this.normalizeDisplayName(user.displayName) ??
         this.buildDefaultDisplayName(email),
-      role: user.role,
+      role: this.asUserRole(user.role),
     };
+  }
+
+  private asUserRole(role: string): AuthenticatedUser["role"] {
+    return role === "admin" || role === "demo" ? role : "member";
   }
 
   private readSessionToken(request: RequestLike): string | null {
