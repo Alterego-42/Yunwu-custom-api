@@ -22,7 +22,7 @@
 
 ```
 Electron 桌面壳
-  └─ utilityProcess: 单个 Node 服务进程
+  └─ 子进程（ELECTRON_RUN_AS_NODE）: 单个 Node 服务进程
        ├─ NestJS API（/api/*、/health、/readiness）
        ├─ 进程内任务队列 + Worker（TASK_WORKER_ENABLED=true）
        ├─ Web 静态托管（同端口，SPA fallback）
