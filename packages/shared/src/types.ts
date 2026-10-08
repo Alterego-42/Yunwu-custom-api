@@ -101,7 +101,7 @@ export interface ModelRecord {
   description?: string;
 }
 
-export type ProviderRouteId = "apixo" | "anyaigc" | "yunwu";
+export type ProviderRouteId = "apixo" | "anyaigc" | "yunwu" | "openlux";
 
 export interface ProviderRouteCredentialStatus {
   providerRouteId: ProviderRouteId;

@@ -8,6 +8,7 @@ import {
   OpenAICompatibleService,
   PROVIDER_API_KEY_NOT_CONFIGURED_MESSAGE,
 } from "../src/openai-compatible/openai-compatible.service";
+import { getProviderRoute } from "../src/openai-compatible/provider-route-registry";
 
 function createConfig(
   pathValue?: string,
@@ -1148,4 +1149,70 @@ test("extractImageResult parses Responses output_image URL output", () => {
   });
 
   assert.equal(result?.url, "https://example.com/responses-output.png");
+});
+
+test("createImageTask targets the documented OpenLux images endpoints", async () => {
+  // OpenLux 的固定线路地址自带 /v1，请求应落在
+  // https://api.openlux.ai/v1/images/generations，而不是 /v1/v1/...。
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    requests.push({ url, body: JSON.parse(String(init?.body ?? "{}")) });
+
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          created: 1773127037,
+          // OpenLux 的响应带 usage 段，data 项仍是标准 OpenAI 形状。
+          data: [
+            { url: "https://cdn.example/openlux-output.webp" },
+          ],
+          usage: { generated_images: 1, output_tokens: 16384, total_tokens: 16384 },
+        }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    const result = await service.createImageTask({
+      capability: "image.generate",
+      model: "gpt-image-2.5-flare",
+      prompt: "产品静物：哑光黑机械键盘，影棚灯光，无文字",
+      baseUrl: getProviderRoute("openlux").baseUrl,
+      params: {
+        size: "1536x1024",
+        quality: "medium",
+        response_format: "url",
+        format: "webp",
+        n: 1,
+      },
+    });
+
+    assert.equal(
+      requests[0].url,
+      "https://api.openlux.ai/v1/images/generations",
+    );
+    // 文档之外的字段由 sanitize 保留，OpenLux 私有字段 format 原样透传。
+    assert.deepEqual(requests[0].body, {
+      size: "1536x1024",
+      quality: "medium",
+      response_format: "url",
+      format: "webp",
+      n: 1,
+      model: "gpt-image-2.5-flare",
+      prompt: "产品静物：哑光黑机械键盘，影棚灯光，无文字",
+    });
+    // mime 类型由后续落盘步骤从真实字节判定，这里只关心 URL 解析正确。
+    assert.equal(result.url, "https://cdn.example/openlux-output.webp");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

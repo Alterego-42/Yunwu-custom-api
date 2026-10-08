@@ -8,7 +8,11 @@ import {
   YUNWU_MODEL_DEFINITIONS,
   getYunwuModelDefinition,
 } from "../src/openai-compatible/yunwu-model-registry";
-import { getProviderRoute } from "../src/openai-compatible/provider-route-registry";
+import {
+  getProviderRoute,
+  PROVIDER_ROUTES,
+} from "../src/openai-compatible/provider-route-registry";
+import { OPENLUX_PROVIDER_MODEL_IDS } from "../src/openai-compatible/openlux.model-registry";
 
 const NOW = new Date("2026-04-24T08:00:00.000Z");
 
@@ -340,7 +344,8 @@ function createHarness(
   };
   const providerCredentials = {
     assertRoute: (routeId: string) => {
-      if (!["yunwu", "anyaigc", "apixo"].includes(routeId)) {
+      // 与线上 ProviderRouteId 保持一致，避免新增线路时测试漏改。
+      if (!PROVIDER_ROUTES.some((route) => route.id === routeId)) {
         throw new BadRequestException("Unsupported provider route.");
       }
       return routeId;
@@ -409,11 +414,12 @@ test("onModuleInit registers每条线路各自的模型，默认启用项互不�
     enabledFor("apixo"),
     [...getProviderRoute("apixo").defaultModelIds].sort(),
   );
-  // 同一模型 id 在两条线路下各自登记一行，互不覆盖。
-  assert.equal(
-    creates.filter((create) => create.model === "gpt-image-2").length,
-    2,
-  );
+  // 同一模型 id 在多条线路下各自登记一行，互不覆盖。
+  const gptImage2Providers = creates
+    .filter((create) => create.model === "gpt-image-2")
+    .map((create) => create.provider);
+  assert.equal(new Set(gptImage2Providers).size, gptImage2Providers.length);
+  assert.ok(gptImage2Providers.includes("openlux"));
   assert.ok(
     creates.some(
       (create) =>
@@ -487,6 +493,80 @@ test("Yunwu model registry includes all GPT, Gemini, and Grok image models", () 
     getYunwuModelDefinition("gpt-4o-image-vip")?.capabilities.includes("image.edit"),
     false,
   );
+});
+
+test("OpenLux 线路有独立模型清单，且不与 OpenAI 兼容线路共用能力行", () => {
+  const route = getProviderRoute("openlux");
+  const openaiCompatibleRoute = getProviderRoute("anyaigc");
+
+  assert.equal(route.providerType, "openai-compatible");
+  assert.equal(route.baseUrl, "https://api.openlux.ai/v1");
+  // 独立 providerId：否则三条 OpenAI 兼容线路的模型能力会互相覆盖。
+  assert.notEqual(route.providerId, openaiCompatibleRoute.providerId);
+  assert.equal(route.providerId, "openlux");
+
+  // 模型清单与 Yunwu 线路不同。
+  const yunwuIds = new Set(openaiCompatibleRoute.modelDefinitions.map((m) => m.id));
+  assert.ok(route.modelDefinitions.some((m) => !yunwuIds.has(m.id)));
+
+  // 默认启用项必须全部来自该线路自己的清单。
+  for (const id of route.defaultModelIds) {
+    assert.ok(
+      route.modelDefinitions.some((m) => m.id === id),
+      `${id} 应在 OpenLux 模型清单中`,
+    );
+  }
+  // OpenAI Images 兼容模型必须可提交任务。
+  for (const model of route.modelDefinitions) {
+    assert.equal(model.family, "openai-images");
+    assert.equal(model.taskSupported, true);
+  }
+  assert.deepEqual(
+    getProviderRoute("openlux").modelDefinitions.find((m) => m.id === "dall-e-3")?.capabilities,
+    ["image.generate"]
+  );
+});
+
+test("切到 OpenLux 线路只保留该线路认识的模型", async () => {
+  let stored: Record<string, unknown> = {
+    activeProviderRouteId: "yunwu",
+    baseUrl: getProviderRoute("yunwu").baseUrl,
+    providerApiKey: null,
+    enabledModelIds: ["gpt-image-2"],
+    enabledModelIdsByRoute: { yunwu: ["gpt-image-2"] },
+    ui: {}
+  };
+  const { service } = createHarness({
+    raw: {
+      $queryRaw: async () => [stored],
+      $executeRaw: async (query: { values?: unknown[] }) => {
+        const values = query.values ?? [];
+        stored = {
+          ...stored,
+          baseUrl: values[2],
+          activeProviderRouteId: values[3],
+          enabledModelIds: JSON.parse(String(values[5])),
+          enabledModelIdsByRoute: JSON.parse(String(values[6]))
+        };
+        return 1;
+      }
+    }
+  });
+
+  const yunwuOnlyId = getProviderRoute("yunwu")
+    .modelDefinitions.map((m) => m.id)
+    .find((id) => !getProviderRoute("openlux").modelDefinitions.some((m) => m.id === id))!;
+
+  const switched = await service.updateSettings(buildUser() as any, {
+    activeProviderRouteId: "openlux",
+    baseUrl: getProviderRoute("openlux").baseUrl,
+    enabledModelIds: [yunwuOnlyId]
+  });
+
+  assert.equal(switched.settings.activeProviderRouteId, "openlux");
+  // Yunwu 独有的模型在 OpenLux 线路上被丢掉，而不是让请求失败。
+  assert.ok(!switched.settings.enabledModelIds.includes(yunwuOnlyId));
+  assert.ok(switched.settings.enabledModelIds.length > 0);
 });
 
 test("getSettings returns user defaults from global base URL", async () => {
@@ -763,8 +843,9 @@ test("每条线路的 API key 相互独立，切换线路不会带走上一条�
     ]),
   );
   assert.equal(routes.apixo, true);
-  assert.equal(routes.yunwu, false);
-  assert.equal(routes.anyaigc, false);
+  for (const route of PROVIDER_ROUTES.filter((entry) => entry.id !== "apixo")) {
+    assert.equal(routes[route.id], false, `${route.id} 不应读到 APIXO 的密钥`);
+  }
 
   // 清空 Yunwu 不会影响 APIXO 已保存的密钥。
   await service.clearProviderRouteApiKey(buildUser() as any, "yunwu");

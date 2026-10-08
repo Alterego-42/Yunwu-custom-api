@@ -82,4 +82,8 @@ export const configuration = () => ({
     apiKey: process.env.YUNWU_API_KEY,
     allowMockImages: process.env.YUNWU_ALLOW_MOCK_IMAGES === "true",
   },
+  openlux: {
+    baseUrl: process.env.OPENLUX_BASE_URL ?? "https://api.openlux.ai/v1",
+    apiKey: process.env.OPENLUX_API_KEY,
+  },
 });

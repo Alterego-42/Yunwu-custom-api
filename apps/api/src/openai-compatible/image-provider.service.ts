@@ -8,6 +8,7 @@ import {
 } from "./openai-compatible.service";
 import {
   getProviderRoute,
+  isProviderRouteId,
   type ProviderRouteId,
 } from "./provider-route-registry";
 
@@ -29,6 +30,9 @@ export class ImageProviderService {
 
   private defaultRouteId(): ProviderRouteId {
     const configured = this.config.get<string>("provider.type")?.trim().toLowerCase();
+    if (isProviderRouteId(configured)) {
+      return configured;
+    }
     return configured === "openai-compatible" || configured === "yunwu" ? "anyaigc" : "apixo";
   }
 
@@ -77,9 +81,13 @@ export class ImageProviderService {
     const routeId = typeof routeOrInput === "string" ? routeOrInput : this.defaultRouteId();
     const effectiveInput = typeof routeOrInput === "string" ? input : routeOrInput;
     const route = this.route(routeId);
+    const apiKey =
+      effectiveInput?.apiKey === undefined
+        ? (this.getServerApiKey(route.serverApiKeyConfigKey) ?? null)
+        : effectiveInput.apiKey;
     return route.providerType === "apixo"
-      ? this.apixo.checkProviderModels(effectiveInput)
-      : this.openaiCompatible.checkProviderModels({ ...effectiveInput, baseUrl: route.baseUrl });
+      ? this.apixo.checkProviderModels({ ...effectiveInput, apiKey })
+      : this.openaiCompatible.checkProviderModels({ ...effectiveInput, apiKey, baseUrl: route.baseUrl });
   }
 
   async createImageTask(
@@ -89,8 +97,16 @@ export class ImageProviderService {
     const routeId = typeof routeOrRequest === "string" ? routeOrRequest : this.defaultRouteId();
     const request = typeof routeOrRequest === "string" ? maybeRequest! : routeOrRequest;
     const route = this.route(routeId);
+    // 未自带 key 时用该线路自己的服务端兜底 key，
+    // 而不是让所有线路共用 yunwu.apiKey。
+    const fallbackKey = this.getServerApiKey(route.serverApiKeyConfigKey);
+    const apiKey = request.apiKey ?? fallbackKey;
     return route.providerType === "apixo"
-      ? this.apixo.createImageTask(request)
-      : this.openaiCompatible.createImageTask({ ...request, baseUrl: route.baseUrl });
+      ? this.apixo.createImageTask({ ...request, apiKey })
+      : this.openaiCompatible.createImageTask({ ...request, apiKey, baseUrl: route.baseUrl });
+  }
+
+  private getServerApiKey(configKey: string) {
+    return this.config.get<string>(configKey)?.trim() || undefined;
   }
 }

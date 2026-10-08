@@ -14,6 +14,8 @@ import {
   DEFAULT_AVAILABLE_MODEL_IDS,
   MODEL_CATALOG,
   normalizeUserSettings,
+  providerRouteIdFromBaseUrl,
+  PROVIDER_ROUTE_OPTIONS,
 } from "@/lib/user-settings";
 
 const mocks = vi.hoisted(() => ({
@@ -615,6 +617,51 @@ describe("settings page", () => {
     // 关键：切线路时不能带上一条线路的模型列表。
     expect((options as { includeModels?: boolean })?.includeModels).toBe(false);
     expect(screen.queryByText(/未写入后端/)).toBeNull();
+  });
+
+  it("offers the OpenLux line and resolves its base url to that line", () => {
+    const option = PROVIDER_ROUTE_OPTIONS.find((entry) => entry.id === "openlux");
+    expect(option?.value).toBe("https://api.openlux.ai/v1");
+
+    expect(providerRouteIdFromBaseUrl("https://api.openlux.ai/v1")).toBe("openlux");
+    expect(providerRouteIdFromBaseUrl("https://api.openlux.ai")).toBe("openlux");
+    expect(
+      normalizeUserSettings({ baseUrl: "https://api.openlux.ai/v1" }).providerRouteId,
+    ).toBe("openlux");
+  });
+
+  it("keeps OpenLux api key state separate from other lines", async () => {
+    mocks.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        baseUrl: "https://api.openlux.ai/v1",
+        activeProviderRouteId: "openlux",
+        enabledModelIds: DEFAULT_AVAILABLE_MODEL_IDS,
+        ui: {},
+        providerApiKey: { configured: true, maskedApiKey: "sk-***lux" },
+        providerRoutes: [
+          { id: "openlux", label: "OpenLux 线路", credential: { configured: true, maskedApiKey: "sk-***lux" } },
+          { id: "apixo", label: "APIXO 线路", credential: { configured: false } },
+        ],
+      },
+    });
+
+    render(<SettingsPage />);
+
+    expect(await screen.findByText(/已配置 sk-\*\*\*lux/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "APIXO 线路" }));
+    expect(await screen.findByText("未配置")).toBeTruthy();
+
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "sk-live-lux" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() =>
+      expect(mocks.updateProviderRouteApiKey).toHaveBeenCalledWith(
+        "apixo",
+        "sk-live-lux",
+      ),
+    );
   });
 
   it("renders user-facing model tags instead of internal capability enums", async () => {

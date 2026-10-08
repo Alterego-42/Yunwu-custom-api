@@ -132,7 +132,17 @@ YUNWU_BASE_URL=https://yunwu.ai
 YUNWU_API_KEY=your_api_key_here
 ```
 
-API key 留空时适合本地联调或 mock-oriented 验证；真实图片生成、编辑和 provider 检查应配置有效 key。两套上游的模型清单独立（APIXO 默认启用 `nano-banana`、`nano-banana-pro`、`gpt-image-1`、`gpt-image-2`、`grok-image`、`flux-2`、`seedream-4-0` 等），管理台 `/admin` 可启停模型。
+API key 留空时适合本地联调或 mock-oriented 验证；真实图片生成、编辑和 provider 检查应配置有效 key。三套上游的模型清单独立（APIXO 默认启用 `nano-banana`、`nano-banana-pro`、`gpt-image-1`、`gpt-image-2`、`grok-image`、`flux-2`、`seedream-4-0` 等），管理台 `/admin` 可启停模型。
+
+### 可选上游线路
+
+| 线路 | 地址 | 调用格式 |
+| --- | --- | --- |
+| APIXO（默认） | `https://api.apixo.ai/api/v1` | 异步任务式，后端内部轮询 |
+| Yunwu / AnyAIGC | `https://yunwu.ai` / `https://anyaigc.com` | OpenAI Images 兼容 |
+| OpenLux | `https://api.openlux.ai/v1` | OpenAI Images 兼容（[文档](https://doc.openlux.ai/reference/v1/images/)） |
+
+用户也可以在设置页自行切换线路并填入该线路自己的 key，互不影响。
 
 ## 默认账号
 

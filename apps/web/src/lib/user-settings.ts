@@ -51,9 +51,9 @@ export type ModelCatalogItem = ModelRecord & {
   vendor: string;
 };
 
-export type ProviderRouteId = "apixo" | "yunwu" | "anyaigc";
+export type ProviderRouteId = "apixo" | "yunwu" | "anyaigc" | "openlux";
 
-/** 三条固定线路：每条线路的 API key 相互独立存储。 */
+/** 固定线路：每条线路的 API key 相互独立存储。 */
 export const PROVIDER_ROUTE_OPTIONS = [
   {
     id: "apixo",
@@ -70,6 +70,11 @@ export const PROVIDER_ROUTE_OPTIONS = [
     label: "AnyAIGC 线路",
     value: "https://anyaigc.com",
   },
+  {
+    id: "openlux",
+    label: "OpenLux 线路",
+    value: "https://api.openlux.ai/v1",
+  },
 ] as const satisfies ReadonlyArray<{
   id: ProviderRouteId;
   label: string;
@@ -79,7 +84,7 @@ export const PROVIDER_ROUTE_OPTIONS = [
 /** @deprecated 保留旧名，指向新的固定线路列表。 */
 export const YUNWU_BASE_URL_OPTIONS = PROVIDER_ROUTE_OPTIONS;
 
-/** 兼容历史里保存过的各种地址写法，按 host 归属到三条固定线路。 */
+/** 兼容历史里保存过的各种地址写法，按 host 归属到固定线路。 */
 export function providerRouteIdFromBaseUrl(value: unknown): ProviderRouteId {
   const normalized = typeof value === "string" ? value.trim().replace(/\/+$/, "") : "";
   const match = PROVIDER_ROUTE_OPTIONS.find((option) => option.value === normalized);
@@ -102,6 +107,9 @@ export function providerRouteIdFromBaseUrl(value: unknown): ProviderRouteId {
   }
   if (host === "api.apixo.ai") {
     return "apixo";
+  }
+  if (host === "api.openlux.ai") {
+    return "openlux";
   }
 
   return "apixo";

@@ -9,8 +9,14 @@ import {
   YUNWU_MODEL_DEFINITIONS,
   type YunwuModelDefinition,
 } from "./yunwu-model-registry";
+import {
+  DEFAULT_OPENLUX_BASE_URL,
+  DEFAULT_OPENLUX_MODEL_IDS,
+  OPENLUX_MODEL_DEFINITIONS,
+  OPENLUX_PROVIDER,
+} from "./openlux.model-registry";
 
-export type ProviderRouteId = "yunwu" | "anyaigc" | "apixo";
+export type ProviderRouteId = "yunwu" | "anyaigc" | "apixo" | "openlux";
 export type ProviderAdapterType = "openai-compatible" | "apixo";
 
 export interface ProviderRouteDefinition {
@@ -21,6 +27,8 @@ export interface ProviderRouteDefinition {
   baseUrl: string;
   modelDefinitions: YunwuModelDefinition[];
   defaultModelIds: readonly string[];
+  /** 用户未自带 key 时使用的服务端兜底 key 配置项。 */
+  serverApiKeyConfigKey: string;
 }
 
 export const PROVIDER_ROUTES: readonly ProviderRouteDefinition[] = [
@@ -32,6 +40,7 @@ export const PROVIDER_ROUTES: readonly ProviderRouteDefinition[] = [
     baseUrl: "https://yunwu.ai",
     modelDefinitions: YUNWU_MODEL_DEFINITIONS,
     defaultModelIds: DEFAULT_YUNWU_MODEL_IDS,
+    serverApiKeyConfigKey: "yunwu.apiKey",
   },
   {
     id: "anyaigc",
@@ -41,6 +50,7 @@ export const PROVIDER_ROUTES: readonly ProviderRouteDefinition[] = [
     baseUrl: "https://anyaigc.com",
     modelDefinitions: YUNWU_MODEL_DEFINITIONS,
     defaultModelIds: DEFAULT_YUNWU_MODEL_IDS,
+    serverApiKeyConfigKey: "yunwu.apiKey",
   },
   {
     id: "apixo",
@@ -50,6 +60,17 @@ export const PROVIDER_ROUTES: readonly ProviderRouteDefinition[] = [
     baseUrl: DEFAULT_APIXO_BASE_URL,
     modelDefinitions: APIXO_MODEL_DEFINITIONS,
     defaultModelIds: DEFAULT_APIXO_MODEL_IDS,
+    serverApiKeyConfigKey: "apixo.apiKey",
+  },
+  {
+    id: "openlux",
+    label: "OpenLux",
+    providerType: "openai-compatible",
+    providerId: OPENLUX_PROVIDER,
+    baseUrl: DEFAULT_OPENLUX_BASE_URL,
+    modelDefinitions: OPENLUX_MODEL_DEFINITIONS,
+    defaultModelIds: DEFAULT_OPENLUX_MODEL_IDS,
+    serverApiKeyConfigKey: "openlux.apiKey",
   },
 ] as const;
 
@@ -73,6 +94,9 @@ export function providerRouteIdFromLegacyBaseUrl(
   }
   if (normalized === "https://api.apixo.ai/api/v1") {
     return "apixo";
+  }
+  if (normalized === "https://api.openlux.ai" || normalized === "https://api.openlux.ai/v1") {
+    return "openlux";
   }
   return undefined;
 }
