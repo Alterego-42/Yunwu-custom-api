@@ -2061,11 +2061,9 @@ export class ApiService implements OnModuleInit {
       }
     }
 
-    // SQLite 只有一条写连接：并发 upsert 会把连接池排满并触发查询超时
-    // （桌面端冷启动时表现为 onModuleInit 失败、服务起不来），所以逐条顺序写。
-    for (const [key, model] of seeded) {
+    const operations = [...seeded.entries()].map(([key, model]) => {
       const provider = key.split("::")[0];
-      await this.prisma.modelCapability.upsert({
+      return this.prisma.modelCapability.upsert({
         where: {
           provider_model_modality: {
             provider,
@@ -2086,6 +2084,12 @@ export class ApiService implements OnModuleInit {
           metadata: this.toModelMetadata(model),
         },
       });
+    });
+
+    // SQLite 只有一条写连接，逐条提交会让冷启动多花近一分钟；
+    // 放进同一个事务只需一次提交。分批是为了避免单次事务过大。
+    for (let index = 0; index < operations.length; index += 25) {
+      await this.prisma.$transaction(operations.slice(index, index + 25));
     }
   }
 

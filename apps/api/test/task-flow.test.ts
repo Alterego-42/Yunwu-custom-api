@@ -264,9 +264,10 @@ function createHarness(
     },
   };
 
+  // 支持两种形态：回调式，以及批量数组式（ensureDefaultModels 用后者）。
   prisma.$transaction = async (
-    callback: (tx: typeof prisma) => Promise<unknown>,
-  ) => callback(prisma);
+    input: ((tx: typeof prisma) => Promise<unknown>) | Array<Promise<unknown>>,
+  ) => (Array.isArray(input) ? Promise.all(input) : input(prisma));
   prisma.$queryRaw = async () => [];
   prisma.$executeRaw = async (query: unknown) => {
     calls.userSettingsPersist.push(query);
