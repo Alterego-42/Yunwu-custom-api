@@ -1216,3 +1216,52 @@ test("createImageTask targets the documented OpenLux images endpoints", async ()
     globalThis.fetch = originalFetch;
   }
 });
+
+test("createImageTask sends Grok Imagine body with aspect_ratio on the OpenLux line", async () => {
+  // grok-imagine-* 命中 service 里的 grok- 分支，走 aspect_ratio / resolution，
+  // 与 OpenLux 文档中 Grok 分组的请求示例一致。
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    requests.push({ url, body: JSON.parse(String(init?.body ?? "{}")) });
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      text: async () =>
+        JSON.stringify({
+          created: 1773127037,
+          data: [{ url: "https://cdn.example/grok-out.png" }],
+        }),
+    } as Response;
+  }) as typeof fetch;
+
+  try {
+    const service = new OpenAICompatibleService(
+      createConfig("./storage") as never,
+      createProviderConfig() as never,
+    );
+
+    await service.createImageTask({
+      capability: "image.generate",
+      model: "grok-imagine-image-2.0",
+      prompt: "a lighthouse in a storm",
+      baseUrl: getProviderRoute("openlux").baseUrl,
+      params: { size: "1024x1536" },
+    });
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].url, "https://api.openlux.ai/v1/images/generations");
+    // size 被换算成 aspect_ratio，并补齐 grok 系列必需的分辨率字段。
+    assert.equal(requests[0].body.aspect_ratio, "2:3");
+    assert.equal(requests[0].body.resolution, "1k");
+    assert.equal(requests[0].body.n, 1);
+    assert.equal(requests[0].body.response_format, "b64_json");
+    assert.equal(requests[0].body.model, "grok-imagine-image-2.0");
+    // 原始 size 也会一并透传（文档中它是 Grok 分组的可选字段）。
+    assert.equal(requests[0].body.size, "1024x1536");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
