@@ -9,6 +9,7 @@ import { AssetUploadService } from "./asset-upload.service";
 import { AssetStorageService } from "./storage/asset-storage.service";
 import { LocalAssetStorageService } from "./storage/local-asset-storage.service";
 import { S3AssetStorageService } from "./storage/s3-asset-storage.service";
+import { LibraryDownloadService } from "./library/library-download.service";
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { S3AssetStorageService } from "./storage/s3-asset-storage.service";
     AssetStorageService,
     LocalAssetStorageService,
     S3AssetStorageService,
+    LibraryDownloadService,
   ],
 })
 export class ApiModule {}

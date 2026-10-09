@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Download, FolderGit2, Image as ImageIcon } from "lucide-react";
 
 import { BatchResultModal } from "@/components/cards/batch-result-modal";
+import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -19,11 +20,16 @@ export function LibraryItemCard({
   actions,
   deleting = false,
   onEditAsset,
+  selected = false,
+  onSelectedChange,
 }: {
   item: LibraryItemRecord;
   actions?: ReactNode;
   deleting?: boolean;
   onEditAsset?: (asset: UiTaskAsset) => void;
+  /** 批量下载多选状态；传入 onSelectedChange 时才渲染勾选框。 */
+  selected?: boolean;
+  onSelectedChange?: (item: LibraryItemRecord, selected: boolean) => void;
 }) {
   const [isBatchModalOpen, setIsBatchModalOpen] = useState(false);
 
@@ -38,7 +44,18 @@ export function LibraryItemCard({
 
   return (
     <>
-      <Card className="overflow-hidden">
+      <Card className={cn("overflow-hidden", selected && "ring-2 ring-primary")}>
+        {onSelectedChange ? (
+          <label className="flex cursor-pointer items-center gap-2 border-b border-[hsl(var(--outline-variant)/0.72)] px-4 py-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              className="h-4 w-4 accent-[hsl(var(--primary))]"
+              checked={selected}
+              onChange={(event) => onSelectedChange(item, event.target.checked)}
+            />
+            加入下载清单
+          </label>
+        ) : null}
         <button
           type="button"
           className="relative block aspect-[4/3] w-full overflow-hidden border-b border-[hsl(var(--outline-variant)/0.72)] bg-[hsl(var(--surface-container-lowest))] text-left"

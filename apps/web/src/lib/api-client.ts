@@ -933,6 +933,37 @@ export const apiClient = {
       },
     );
   },
+
+  /**
+   * 批量下载作品库内容。返回服务端打包好的 zip 流，
+   * 由调用方触发浏览器下载；文件名规则在服务端（日期 + 哈希前几位）。
+   */
+  async downloadLibraryAssets(assetIds: string[]) {
+    const response = await fetch(joinApiPath("/library/download"), {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ assetIds }),
+    });
+
+    if (!response.ok) {
+      let message = `下载失败：${response.status}`;
+      try {
+        const payload = (await response.json()) as { message?: string | string[] };
+        const raw = payload.message;
+        if (Array.isArray(raw)) {
+          message = raw.join("；");
+        } else if (typeof raw === "string" && raw) {
+          message = raw;
+        }
+      } catch {
+        // 响应不是 JSON（例如网关错误页），保留状态码信息即可。
+      }
+      throw new Error(message);
+    }
+
+    return response.blob();
+  },
 };
 
 export { ApiError };

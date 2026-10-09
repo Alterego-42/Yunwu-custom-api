@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { ImageLightbox } from "@/components/ui/image-lightbox";
 import { resolveAssetUrl } from "@/lib/api-mappers";
 import type { UiTask, UiTaskAsset } from "@/lib/api-types";
+import { useBatchDownload } from "@/lib/use-batch-download";
 
 export function BatchResultModal({
   task,
@@ -21,6 +22,7 @@ export function BatchResultModal({
     asset: UiTaskAsset;
     url: string;
   } | null>(null);
+  const { download, downloading } = useBatchDownload();
 
   if (!open) {
     return null;
@@ -62,14 +64,27 @@ export function BatchResultModal({
               成功 {task.batch?.successCount ?? successfulSlots.length} / 共 {task.batch?.batchSize ?? successfulSlots.length} 个
             </p>
           </div>
-          <button
-            type="button"
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
-            aria-label="关闭批量结果"
-            onClick={onClose}
-          >
-            <X className="h-4 w-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={downloading || successfulSlots.length === 0}
+              onClick={() =>
+                void download(successfulSlots.map((slot) => slot.asset?.id ?? ""))
+              }
+            >
+              <Download className="h-4 w-4" />
+              {downloading ? "打包中..." : `下载全部 (${successfulSlots.length})`}
+            </Button>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-white/10 text-muted-foreground transition hover:bg-white/10 hover:text-foreground"
+              aria-label="关闭批量结果"
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
 
         <div className="min-h-0 overflow-auto p-4">

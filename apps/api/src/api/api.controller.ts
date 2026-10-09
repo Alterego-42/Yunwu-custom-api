@@ -21,6 +21,7 @@ import {
 import { Observable } from "rxjs";
 import { FileInterceptor } from "@nestjs/platform-express";
 import { createReadStream } from "node:fs";
+import { Readable } from "node:stream";
 import type {
   ConversationEvent,
   ArchiveConversationResponse,
@@ -50,6 +51,7 @@ import type {
   UploadAssetResponse,
 } from "./api.types";
 import { ApiService } from "./api.service";
+import { LibraryDownloadService } from "./library/library-download.service";
 import { AssetUploadService } from "./asset-upload.service";
 import { ConversationEventsService } from "./conversation-events.service";
 import { CurrentUser } from "../auth/current-user.decorator";
@@ -63,7 +65,9 @@ import { TestGenerateProviderDto } from "./dto/test-generate-provider.dto";
 import { UpdateModelCapabilityDto } from "./dto/update-model-capability.dto";
 import { UpdateProviderConfigDto } from "./dto/update-provider-config.dto";
 import { UpdateProviderRouteApiKeyDto } from "./dto/update-provider-route-api-key.dto";
-import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";import {
+import { UpdateUserSettingsDto } from "./dto/update-user-settings.dto";
+import { DownloadLibraryAssetsDto } from "./dto/download-library-assets.dto";
+import {
   AppLoggerService,
   type AppLogLevelQuery,
 } from "../logging/app-logger.service";
@@ -73,6 +77,7 @@ import type { UploadedAssetFile } from "./upload.types";
 export class ApiController {
   constructor(
     private readonly api: ApiService,
+    private readonly libraryDownload: LibraryDownloadService,
     private readonly assetUpload: AssetUploadService,
     private readonly conversationEvents: ConversationEventsService,
     private readonly appLogger: AppLoggerService,
@@ -199,6 +204,27 @@ export class ApiController {
     @Param("id") id: string,
   ): Promise<DeleteLibraryAssetResponse> {
     return this.api.deleteLibraryAsset(user, id);
+  }
+
+  @Post("library/download")
+  downloadLibraryAssets(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() input: DownloadLibraryAssetsDto,
+    @Res({ passthrough: true })
+    response: {
+      setHeader: (name: string, value: string) => void;
+    },
+  ): StreamableFile {
+    const stream = this.libraryDownload.streamDownload(user, input.assetIds);
+    const zipName = `yunwu-library-${new Date().toISOString().slice(0, 10)}.zip`;
+
+    response.setHeader("Content-Type", "application/zip");
+    response.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${zipName}"; filename*=UTF-8''${zipName}`,
+    );
+
+    return new StreamableFile(Readable.from(stream));
   }
 
   @Get("conversations/:id/task-events")
